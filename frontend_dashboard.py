@@ -270,7 +270,6 @@ def live_dashboard_matrix():
                     width="stretch",
                     hide_index=True,
                     disabled=["Stock Name"],
-                    use_container_width=True,
                     key="holdings_buy_date_editor",
                 )
 
