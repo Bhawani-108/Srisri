@@ -23,27 +23,110 @@ h3 {
 }
 
 .stMetric {
-    padding: 0.15rem 0.35rem 0.08rem 0.35rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+    text-align: center !important;
+    padding: 0.22rem 0.35rem 0.14rem 0.35rem !important;
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 10px;
     background: rgba(15, 23, 42, 0.6);
-    text-align: center !important;
+    min-height: 92px !important;
 }
 
 .stMetric [data-testid="stMetricValue"] {
     font-size: 1.05rem !important;
     line-height: 1.2 !important;
     text-align: center !important;
+    width: 100% !important;
 }
 
 .stMetric [data-testid="stMetricLabel"] {
     font-size: 0.72rem !important;
     color: #dfe8f3 !important;
     text-align: center !important;
+    width: 100% !important;
 }
 
 div[data-testid="metric-container"] {
+    display: flex !important;
+    align-items: stretch !important;
+    justify-content: center !important;
     text-align: center !important;
+}
+
+.stTabs [role="tablist"] {
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: flex-start;
+    margin-bottom: 0.4rem;
+}
+
+.stTabs [role="tab"] {
+    font-size: 0.78rem !important;
+    padding: 0.38rem 0.72rem !important;
+    border-radius: 8px 8px 0 0;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+div[data-testid="stToggle"] {
+    margin-top: 0.1rem;
+    margin-bottom: 0.1rem;
+}
+
+div[data-testid="stToggle"] label {
+    font-size: 0.8rem !important;
+    font-weight: 600;
+}
+
+div[data-testid="stToggle"] [role="switch"] {
+    background: rgba(34, 197, 94, 0.2);
+}
+
+.stSidebar {
+    padding-top: 0.5rem !important;
+}
+
+.stSidebar .stSelectbox label,
+.stSidebar .stTextInput label,
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button,
+.stSidebar p {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stSelectbox div[data-baseweb="select"] {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button {
+    height: 2.3rem !important;
+    border-radius: 8px !important;
+}
+
+.stCaption {
+    font-size: 0.74rem !important;
+}
+
+.stSuccess, .stWarning, .stError, .stInfo {
+    font-size: 0.78rem !important;
+}
+
+section[data-testid="stSidebar"] {
+    background: rgba(2, 11, 22, 0.82);
+}
+
+button[kind="secondary"] {
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+button[kind="secondary"]:hover {
+    border-color: rgba(96, 165, 250, 0.7);
 }
 
 .stDataFrame {
