@@ -11,6 +11,49 @@ st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
 CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
+BUY_DATE_FILE = "manual_buy_dates.csv"
+
+
+def ensure_manual_buy_date_file():
+    if not os.path.exists(BUY_DATE_FILE):
+        pd.DataFrame(columns=["Stock Name", "Buy Date"]).to_csv(BUY_DATE_FILE, index=False)
+
+
+def load_manual_buy_dates():
+    ensure_manual_buy_date_file()
+    try:
+        df = pd.read_csv(BUY_DATE_FILE)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
+
+    if df.empty:
+        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
+
+    if "Stock Name" not in df.columns or "Buy Date" not in df.columns:
+        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
+
+    df = df[["Stock Name", "Buy Date"]].copy()
+    df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
+    df["Buy Date"] = pd.to_datetime(df["Buy Date"], errors="coerce")
+    df = df.dropna(subset=["Stock Name", "Buy Date"]).copy()
+    df["Buy Date"] = df["Buy Date"].dt.strftime("%Y-%m-%d")
+    return df.reset_index(drop=True)
+
+
+def apply_manual_buy_dates(df):
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    manual_dates = load_manual_buy_dates()
+    if manual_dates.empty:
+        return df
+
+    mapping = dict(zip(manual_dates["Stock Name"], manual_dates["Buy Date"]))
+    if "Stock Name" in df.columns:
+        df["Buy Date"] = df["Stock Name"].map(mapping).where(pd.notna(df["Stock Name"].map(mapping)), df.get("Buy Date"))
+
+    return df
 
 # ==========================================
 # START BACKGROUND ENGINE ON STREAMLIT CLOUD
@@ -75,6 +118,49 @@ with st.sidebar:
                 st.success(f"Removed '{stock_to_remove}'")
                 st.rerun()
 
+    st.divider()
+    st.subheader("✏️ Manual Buy Date")
+    ensure_manual_buy_date_file()
+    try:
+        holdings_df = pd.read_csv(CSV_FILE)
+        if "Type" in holdings_df.columns:
+            holdings_df = holdings_df[holdings_df["Type"] == "Holding"].copy()
+
+        if not holdings_df.empty and "Stock Name" in holdings_df.columns:
+            holding_names = [str(x).upper() for x in holdings_df["Stock Name"].dropna().unique()]
+            if holding_names:
+                selected_stock = st.selectbox("Holding", sorted(holding_names), index=0)
+                saved_dates = load_manual_buy_dates()
+                saved_match = saved_dates[saved_dates["Stock Name"] == selected_stock] if not saved_dates.empty else pd.DataFrame(columns=["Stock Name", "Buy Date"])
+
+                default_value = pd.Timestamp.today()
+                if not saved_match.empty and "Buy Date" in saved_match.columns:
+                    parsed = pd.to_datetime(saved_match["Buy Date"].iloc[0], errors="coerce")
+                    if pd.notna(parsed):
+                        default_value = parsed
+                elif "Buy Date" in holdings_df.columns and selected_stock in holdings_df["Stock Name"].astype(str).str.upper().values:
+                    current_rows = holdings_df[holdings_df["Stock Name"].astype(str).str.upper() == selected_stock]
+                    if not current_rows.empty and "Buy Date" in current_rows.columns:
+                        parsed = pd.to_datetime(current_rows["Buy Date"].iloc[0], errors="coerce")
+                        if pd.notna(parsed):
+                            default_value = parsed
+
+                chosen_date = st.date_input("Buy Date", value=default_value)
+                if st.button("💾 Save Buy Date", width="stretch"):
+                    ledger = load_manual_buy_dates()
+                    payload = {"Stock Name": selected_stock, "Buy Date": chosen_date.isoformat()}
+                    filtered = ledger[ledger["Stock Name"] != selected_stock]
+                    filtered = pd.concat([filtered, pd.DataFrame([payload])], ignore_index=True)
+                    filtered.to_csv(BUY_DATE_FILE, index=False)
+                    st.success(f"Saved buy date for {selected_stock}")
+                    st.rerun()
+            else:
+                st.info("No holdings available to edit.")
+        else:
+            st.info("No holdings available to edit.")
+    except Exception:
+        st.info("This will be available once holdings are loaded.")
+
 # ==========================================
 # DASHBOARD DISPLAY & LIVE REFRESH FRAGMENT
 # ==========================================
@@ -101,7 +187,8 @@ def live_dashboard_matrix():
     try:
         ensure_backend_data_loaded()
         df = pd.read_csv(CSV_FILE)
-        
+        df = apply_manual_buy_dates(df)
+
         if 'Type' not in df.columns:
             st.info("Syncing backend data stream...")
             return

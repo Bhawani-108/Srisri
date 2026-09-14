@@ -4,6 +4,7 @@ import pyotp
 import pandas as pd
 import os
 import tempfile
+from datetime import datetime
 import streamlit as st
 from SmartApi import SmartConnect
 
@@ -69,6 +70,81 @@ def load_scrip_master():
 TOKEN_MAP = load_scrip_master()
 LAST_WATCHLIST_MTIME = 0
 
+
+def parse_trade_datetime(value):
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        text = text.replace("Z", "+00:00")
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d-%m-%Y %H:%M:%S",
+            "%d-%m-%Y",
+            "%d/%m/%Y %H:%M:%S",
+            "%d/%m/%Y",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y/%m/%d",
+        ):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                pass
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            pass
+
+    try:
+        return pd.to_datetime(value).to_pydatetime()
+    except Exception:
+        return None
+
+
+def get_latest_buy_metadata():
+    buy_meta = {}
+    try:
+        trade_res = smart_connect.tradeBook()
+        if not trade_res or not trade_res.get('status'):
+            return buy_meta
+
+        entries = trade_res.get('data') or []
+        for item in entries:
+            symbol = str(item.get('tradingsymbol') or item.get('symbolname') or '').split('-')[0].strip().upper()
+            txn = str(item.get('transactiontype') or item.get('transactionType') or item.get('transtype') or '').upper()
+            if not symbol or txn not in {'BUY', 'B'}:
+                continue
+
+            price = item.get('averageprice')
+            if price is None:
+                price = item.get('tradeprice') or item.get('tradePrice') or item.get('price') or item.get('buyprice') or item.get('buyPrice')
+
+            dt_value = (
+                item.get('tradedatetime') or item.get('tradeDate') or item.get('trade_date')
+                or item.get('orderDate') or item.get('datetime') or item.get('timestamp')
+            )
+            trade_dt = parse_trade_datetime(dt_value)
+
+            existing = buy_meta.get(symbol)
+            if existing is None or (trade_dt and (existing.get('dt') is None or trade_dt > existing['dt'])):
+                buy_meta[symbol] = {
+                    'Buy Date': dt_value,
+                    'Buy Price': float(price) if price not in (None, '', '0') else None,
+                    'dt': trade_dt,
+                }
+    except Exception as e:
+        print(f"Trade book fetch notice: {e}")
+
+    return buy_meta
+
 # ==========================================
 # SYNC HOLDINGS & WATCHLIST
 # ==========================================
@@ -82,6 +158,7 @@ def sync_portfolio_registry(current_df):
 
         combined = []
         seen = set()
+        buy_metadata = get_latest_buy_metadata()
 
         try:
             h_res = smart_connect.holding()
@@ -92,15 +169,10 @@ def sync_portfolio_registry(current_df):
                     if not tok or tok == "0":
                         tok = TOKEN_MAP.get(sym, "")
 
-                    buy_date = (
-                        item.get('buydate') or item.get('buyDate') or item.get('purchaseDate')
-                        or item.get('purchasedate') or item.get('createddate') or item.get('createdDate')
-                    )
+                    buy_meta = buy_metadata.get(sym, {})
+                    buy_date = buy_meta.get('Buy Date')
+                    buy_price = buy_meta.get('Buy Price')
                     average_price = float(item.get('averageprice', 0.0))
-                    buy_price = (
-                        item.get('buyprice') or item.get('buyPrice') or item.get('averageprice')
-                        or item.get('averagePrice') or item.get('lastbuyprice') or item.get('lastBuyPrice')
-                    )
 
                     if sym and tok:
                         seen.add(sym)
@@ -112,7 +184,7 @@ def sync_portfolio_registry(current_df):
                             'Quantity': float(item.get('quantity', 0)),
                             'Average Price': average_price,
                             'Buy Date': buy_date,
-                            'Buy Price': float(buy_price if buy_price not in (None, '', '0') else average_price),
+                            'Buy Price': buy_price if buy_price is not None else average_price,
                         })
         except Exception as e:
             print(f"Holdings fetch notice: {e}")
