@@ -55,6 +55,37 @@ def apply_manual_buy_dates(df):
 
     return df
 
+
+def style_live_delta_columns(df, columns=("D%", "% Profit")):
+    if df is None or df.empty:
+        return df
+
+    work_df = df.copy()
+    target_columns = [col for col in columns if col in work_df.columns]
+    if not target_columns:
+        return work_df
+
+    for col in target_columns:
+        work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
+
+    def highlight_value(value):
+        if pd.isna(value):
+            return "background-color: #f3f4f6; color: #111827; font-weight: 600;"
+        if value > 0:
+            return "background-color: #1f9d55; color: white; font-weight: 700;"
+        if value < 0:
+            return "background-color: #d64545; color: white; font-weight: 700;"
+        return "background-color: #e5e7eb; color: #111827; font-weight: 600;"
+
+    def row_style(row):
+        styles = ["" for _ in row]
+        for idx, col_name in enumerate(row.index):
+            if col_name in target_columns:
+                styles[idx] = highlight_value(row[col_name])
+        return styles
+
+    return work_df.style.apply(row_style, axis=1)
+
 # ==========================================
 # START BACKGROUND ENGINE ON STREAMLIT CLOUD
 # ==========================================
@@ -200,17 +231,19 @@ def live_dashboard_matrix():
             if not holdings_df.empty:
                 disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
                 disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
-                edited_holdings = st.data_editor(
-                    disp_holdings,
+
+                buy_date_editor = disp_holdings[["Stock Name", "Buy Date"]].copy()
+                edited_buy_dates = st.data_editor(
+                    buy_date_editor,
                     width="stretch",
                     hide_index=True,
-                    disabled=[c for c in disp_holdings.columns if c != "Buy Date"],
+                    disabled=["Stock Name"],
                     use_container_width=True,
-                    key="holdings_table_editor",
+                    key="holdings_buy_date_editor",
                 )
 
-                if not edited_holdings.equals(disp_holdings):
-                    manual_rows = edited_holdings[["Stock Name", "Buy Date"]].copy()
+                if not edited_buy_dates.equals(buy_date_editor):
+                    manual_rows = edited_buy_dates[["Stock Name", "Buy Date"]].copy()
                     manual_rows = manual_rows[manual_rows["Stock Name"].notna()].copy()
                     manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
                     manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -221,6 +254,9 @@ def live_dashboard_matrix():
                         ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
                         ledger = pd.concat([ledger, manual_rows[["Stock Name", "Buy Date"]]], ignore_index=True)
                         ledger.to_csv(BUY_DATE_FILE, index=False)
+
+                styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
+                st.dataframe(styled_holdings, use_container_width=True, hide_index=True)
             else:
                 st.info("No delivery holdings currently in your Angel One account.")
 
@@ -228,7 +264,8 @@ def live_dashboard_matrix():
             if not watchlist_df.empty:
                 disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
                 disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
-                st.dataframe(disp_watchlist, width="stretch", height=500)
+                styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
+                st.dataframe(styled_watchlist, use_container_width=True, hide_index=True, height=500)
             else:
                 st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 
