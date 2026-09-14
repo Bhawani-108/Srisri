@@ -30,7 +30,10 @@ ORDERED_COLUMNS = [
 
 
 def _safe_numeric(series):
-    return pd.to_numeric(series, errors="coerce")
+    result = pd.to_numeric(series, errors="coerce")
+    if isinstance(result, pd.Series):
+        return result
+    return pd.Series([result] * len(df), index=df.index) if hasattr(df, 'index') else pd.Series([result])
 
 
 def build_ordered_display_frame(df, row_type="Holding"):
@@ -47,20 +50,20 @@ def build_ordered_display_frame(df, row_type="Holding"):
     exchange = rows.get("Exchange", pd.Series(["NSE"] * len(rows), index=rows.index))
     exchange = exchange.fillna("NSE").astype(str)
 
-    cmp = _safe_numeric(rows.get("CMP"))
-    pc = _safe_numeric(rows.get("PC"))
-    day_high = _safe_numeric(rows.get("Day High"))
-    volume = _safe_numeric(rows.get("Volume"))
-    quantity = _safe_numeric(rows.get("Quantity"))
-    avg_price = _safe_numeric(rows.get("Average Price"))
-    buy_price_override = _safe_numeric(rows.get("Buy Price"))
+    cmp = _safe_numeric(rows.get("CMP", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    pc = _safe_numeric(rows.get("PC", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    day_high = _safe_numeric(rows.get("Day High", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    volume = _safe_numeric(rows.get("Volume", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    quantity = _safe_numeric(rows.get("Quantity", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    avg_price = _safe_numeric(rows.get("Average Price", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    buy_price_override = _safe_numeric(rows.get("Buy Price", pd.Series([pd.NA] * len(rows), index=rows.index)))
     recorded_buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
-    d_pct = _safe_numeric(rows.get("D%"))
-    dh_pct = _safe_numeric(rows.get("DH%"))
-    s_alert = _safe_numeric(rows.get("SAlert"))
+    d_pct = _safe_numeric(rows.get("D%", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    dh_pct = _safe_numeric(rows.get("DH%", pd.Series([pd.NA] * len(rows), index=rows.index)))
+    s_alert = _safe_numeric(rows.get("SAlert", pd.Series([pd.NA] * len(rows), index=rows.index)))
 
     buy_qty = quantity.copy()
-    buy_price = buy_price_override.fillna(avg_price)
+    buy_price = buy_price_override.combine_first(avg_price)
     buy_date = pd.Series(recorded_buy_date, index=rows.index)
     sell_date = pd.Series([pd.NA] * len(rows), index=rows.index)
     sell_price = pd.Series([pd.NA] * len(rows), index=rows.index)
