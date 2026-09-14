@@ -51,23 +51,34 @@ def load_scrip_master():
         res = requests.get(SCRIP_MASTER_URL, timeout=25)
         res.raise_for_status()
         scrip_data = res.json()
-        
+
         token_map = {}
+        exchange_map = {}
         for item in scrip_data:
-            if item.get('exch_seg') == 'NSE':
-                sym = str(item.get('symbol', ''))
-                if sym.endswith(('-EQ', '-BE', '-BZ', '-SM')):
-                    clean_sym = sym.split('-')[0]
-                    if clean_sym not in token_map or sym.endswith('-EQ'):
-                        token_map[clean_sym] = str(item['token'])
-                        
-        print(f"Scrip Master indexed: {len(token_map)} active NSE instruments.")
-        return token_map
+            exch = str(item.get('exch_seg', '')).upper()
+            if exch not in {'NSE', 'BSE'}:
+                continue
+
+            sym = str(item.get('symbol', '')).strip()
+            if not sym or not sym.endswith(('-EQ', '-BE', '-BZ', '-SM')):
+                continue
+
+            clean_sym = sym.split('-')[0].upper()
+            token = str(item.get('token', '')).strip()
+            if not token:
+                continue
+
+            if clean_sym not in token_map or (exch == 'NSE' and exchange_map.get(clean_sym) != 'NSE'):
+                token_map[clean_sym] = token
+                exchange_map[clean_sym] = exch
+
+        print(f"Scrip Master indexed: {len(token_map)} active NSE/BSE instruments.")
+        return token_map, exchange_map
     except Exception as e:
         print(f"Failed to fetch Scrip Master: {e}")
-        return {}
+        return {}, {}
 
-TOKEN_MAP = load_scrip_master()
+TOKEN_MAP, EXCHANGE_MAP = load_scrip_master()
 LAST_WATCHLIST_MTIME = 0
 
 
@@ -194,11 +205,12 @@ def sync_portfolio_registry(current_df):
                 watch_tickers = [line.strip().upper() for line in f if line.strip()]
 
             for sym in watch_tickers:
-                if sym not in seen and sym in TOKEN_MAP:
+                token = TOKEN_MAP.get(sym)
+                if sym not in seen and token:
                     combined.append({
                         'Stock Name': sym,
-                        'Exchange': 'NSE',
-                        'Token': TOKEN_MAP[sym],
+                        'Exchange': EXCHANGE_MAP.get(sym, 'NSE'),
+                        'Token': token,
                         'Type': 'Watchlist',
                         'Quantity': 0.0,
                         'Average Price': 0.0

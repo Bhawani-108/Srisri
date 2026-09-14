@@ -128,11 +128,11 @@ with st.sidebar:
     with st.form(key="add_ticker_form", clear_on_submit=True):
         searchable_symbols = get_searchable_nse_symbols()
         selected_ticker = st.selectbox(
-            "Search NSE stock",
+            "Search stock",
             options=searchable_symbols,
             index=None,
             placeholder="Type to search any stock...",
-            help="Search from the live Angel One scrip master."
+            help="Search any NSE/BSE instrument from the live Angel One scrip master."
         )
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
 
