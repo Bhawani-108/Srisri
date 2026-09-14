@@ -221,8 +221,6 @@ def live_dashboard_matrix():
                         ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
                         ledger = pd.concat([ledger, manual_rows[["Stock Name", "Buy Date"]]], ignore_index=True)
                         ledger.to_csv(BUY_DATE_FILE, index=False)
-
-                st.dataframe(edited_holdings, width="stretch", height=500)
             else:
                 st.info("No delivery holdings currently in your Angel One account.")
 
