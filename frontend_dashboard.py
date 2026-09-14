@@ -201,6 +201,9 @@ st.title("📊 Live Portfolio & Market Watchlist")
 st.caption("Live feed via Angel One SmartAPI • Streaming updates every 2s")
 st.divider()
 
+with st.container():
+    chart_toggle = st.toggle("📈 Show Charts", value=False, key="show_chart_panel")
+
 @st.fragment(run_every="2s")
 def live_dashboard_matrix():
     try:
@@ -227,31 +230,32 @@ def live_dashboard_matrix():
         col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
         st.divider()
 
-        left_col, right_col = st.columns(2)
-        with left_col:
-            st.subheader("📁 Portfolio Allocation")
-            if not holdings_df.empty and current_value > 0:
-                fig_pie = px.pie(
-                    holdings_df, values='Current Value', names='Stock Name', hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Safe
-                )
-                fig_pie.update_traces(textinfo='percent+label')
-                st.plotly_chart(fig_pie, width="stretch")
-            else:
-                st.info("No active demat holdings found.")
+        if chart_toggle:
+            left_col, right_col = st.columns(2)
+            with left_col:
+                st.subheader("📁 Portfolio Allocation")
+                if not holdings_df.empty and current_value > 0:
+                    fig_pie = px.pie(
+                        holdings_df, values='Current Value', names='Stock Name', hole=0.4,
+                        color_discrete_sequence=px.colors.qualitative.Safe
+                    )
+                    fig_pie.update_traces(textinfo='percent+label')
+                    st.plotly_chart(fig_pie, width="stretch")
+                else:
+                    st.info("No active demat holdings found.")
 
-        with right_col:
-            st.subheader("📊 Profit & Loss by Holding (₹)")
-            if not holdings_df.empty and current_value > 0:
-                fig_bar = px.bar(
-                    holdings_df, x='Stock Name', y='Net P&L', color='Net P&L',
-                    color_continuous_scale=['#FF4B4B', '#00CC96']
-                )
-                st.plotly_chart(fig_bar, width="stretch")
-            else:
-                st.info("No active demat holdings found.")
+            with right_col:
+                st.subheader("📊 Profit & Loss by Holding (₹)")
+                if not holdings_df.empty and current_value > 0:
+                    fig_bar = px.bar(
+                        holdings_df, x='Stock Name', y='Net P&L', color='Net P&L',
+                        color_continuous_scale=['#FF4B4B', '#00CC96']
+                    )
+                    st.plotly_chart(fig_bar, width="stretch")
+                else:
+                    st.info("No active demat holdings found.")
 
-        st.divider()
+            st.divider()
 
         tab1, tab2 = st.tabs(["💼 Demat Holdings", "👀 Market Watchlist"])
 
