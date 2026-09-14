@@ -119,47 +119,7 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.subheader("✏️ Manual Buy Date")
-    ensure_manual_buy_date_file()
-    try:
-        holdings_df = pd.read_csv(CSV_FILE)
-        if "Type" in holdings_df.columns:
-            holdings_df = holdings_df[holdings_df["Type"] == "Holding"].copy()
-
-        if not holdings_df.empty and "Stock Name" in holdings_df.columns:
-            holding_names = [str(x).upper() for x in holdings_df["Stock Name"].dropna().unique()]
-            if holding_names:
-                selected_stock = st.selectbox("Holding", sorted(holding_names), index=0)
-                saved_dates = load_manual_buy_dates()
-                saved_match = saved_dates[saved_dates["Stock Name"] == selected_stock] if not saved_dates.empty else pd.DataFrame(columns=["Stock Name", "Buy Date"])
-
-                default_value = pd.Timestamp.today()
-                if not saved_match.empty and "Buy Date" in saved_match.columns:
-                    parsed = pd.to_datetime(saved_match["Buy Date"].iloc[0], errors="coerce")
-                    if pd.notna(parsed):
-                        default_value = parsed
-                elif "Buy Date" in holdings_df.columns and selected_stock in holdings_df["Stock Name"].astype(str).str.upper().values:
-                    current_rows = holdings_df[holdings_df["Stock Name"].astype(str).str.upper() == selected_stock]
-                    if not current_rows.empty and "Buy Date" in current_rows.columns:
-                        parsed = pd.to_datetime(current_rows["Buy Date"].iloc[0], errors="coerce")
-                        if pd.notna(parsed):
-                            default_value = parsed
-
-                chosen_date = st.date_input("Buy Date", value=default_value)
-                if st.button("💾 Save Buy Date", width="stretch"):
-                    ledger = load_manual_buy_dates()
-                    payload = {"Stock Name": selected_stock, "Buy Date": chosen_date.isoformat()}
-                    filtered = ledger[ledger["Stock Name"] != selected_stock]
-                    filtered = pd.concat([filtered, pd.DataFrame([payload])], ignore_index=True)
-                    filtered.to_csv(BUY_DATE_FILE, index=False)
-                    st.success(f"Saved buy date for {selected_stock}")
-                    st.rerun()
-            else:
-                st.info("No holdings available to edit.")
-        else:
-            st.info("No holdings available to edit.")
-    except Exception:
-        st.info("This will be available once holdings are loaded.")
+    st.caption("Double-click a holding's Buy Date cell in the table below to edit it and save it automatically.")
 
 # ==========================================
 # DASHBOARD DISPLAY & LIVE REFRESH FRAGMENT
@@ -240,7 +200,29 @@ def live_dashboard_matrix():
             if not holdings_df.empty:
                 disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
                 disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
-                st.dataframe(disp_holdings, width="stretch", height=500)
+                edited_holdings = st.data_editor(
+                    disp_holdings,
+                    width="stretch",
+                    hide_index=True,
+                    disabled=[c for c in disp_holdings.columns if c != "Buy Date"],
+                    use_container_width=True,
+                    key="holdings_table_editor",
+                )
+
+                if not edited_holdings.equals(disp_holdings):
+                    manual_rows = edited_holdings[["Stock Name", "Buy Date"]].copy()
+                    manual_rows = manual_rows[manual_rows["Stock Name"].notna()].copy()
+                    manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
+                    manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                    manual_rows = manual_rows.dropna(subset=["Buy Date"]).drop_duplicates(subset=["Stock Name"], keep="last")
+
+                    if not manual_rows.empty:
+                        ledger = load_manual_buy_dates()
+                        ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
+                        ledger = pd.concat([ledger, manual_rows[["Stock Name", "Buy Date"]]], ignore_index=True)
+                        ledger.to_csv(BUY_DATE_FILE, index=False)
+
+                st.dataframe(edited_holdings, width="stretch", height=500)
             else:
                 st.info("No delivery holdings currently in your Angel One account.")
 
