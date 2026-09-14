@@ -1,0 +1,82 @@
+html, body, [data-testid="stAppViewContainer"] {
+    background: #020b16;
+}
+
+.block-container {
+    padding-top: 1.2rem !important;
+    padding-bottom: 1rem !important;
+    max-width: 100% !important;
+}
+
+h1 {
+    font-size: 2.2rem !important;
+    margin-bottom: 0.25rem !important;
+}
+
+h2 {
+    font-size: 1.1rem !important;
+}
+
+h3 {
+    font-size: 1rem !important;
+}
+
+.stMetric {
+    padding: 0.2rem 0.4rem 0.1rem 0.4rem !important;
+}
+
+.stMetric [data-testid="stMetricValue"] {
+    font-size: 1.15rem !important;
+    line-height: 1.2 !important;
+}
+
+.stMetric [data-testid="stMetricLabel"] {
+    font-size: 0.75rem !important;
+    color: #dfe8f3 !important;
+}
+
+.stDataFrame {
+    font-size: 0.72rem !important;
+}
+
+.stDataFrame table {
+    font-size: 0.72rem !important;
+}
+
+.stTabs [role="tablist"] {
+    gap: 0.5rem;
+}
+
+.stTabs [role="tab"] {
+    font-size: 0.8rem !important;
+    padding: 0.45rem 0.8rem !important;
+}
+
+.stSidebar {
+    padding-top: 0.5rem !important;
+}
+
+.stSidebar .stSelectbox label,
+.stSidebar .stTextInput label,
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button,
+.stSidebar p {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stSelectbox div[data-baseweb="select"] {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button {
+    height: 2.3rem !important;
+}
+
+.stCaption {
+    font-size: 0.76rem !important;
+}
+
+.stSuccess, .stWarning, .stError, .stInfo {
+    font-size: 0.8rem !important;
+}

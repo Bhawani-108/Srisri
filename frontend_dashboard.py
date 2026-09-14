@@ -9,6 +9,11 @@ from portfolio_display import build_ordered_display_frame, ORDERED_COLUMNS
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
+with open("styles.css", "r", encoding="utf-8") as f:
+    css = f.read()
+
+st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
 CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 BUY_DATE_FILE = "manual_buy_dates.csv"
