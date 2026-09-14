@@ -70,12 +70,12 @@ def style_live_delta_columns(df, columns=("D%", "% Profit")):
 
     def highlight_value(value):
         if pd.isna(value):
-            return "background-color: #f3f4f6; color: #111827; font-weight: 600;"
+            return "background-color: #f3f4f6; color: #111827;"
         if value > 0:
-            return "background-color: #1f9d55; color: white; font-weight: 700;"
+            return "background-color: #1f9d55; color: white;"
         if value < 0:
-            return "background-color: #d64545; color: white; font-weight: 700;"
-        return "background-color: #e5e7eb; color: #111827; font-weight: 600;"
+            return "background-color: #d64545; color: white;"
+        return "background-color: #e5e7eb; color: #111827;"
 
     def row_style(row):
         styles = ["" for _ in row]
