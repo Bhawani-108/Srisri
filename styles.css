@@ -27,16 +27,23 @@ h3 {
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 10px;
     background: rgba(15, 23, 42, 0.6);
+    text-align: center !important;
 }
 
 .stMetric [data-testid="stMetricValue"] {
     font-size: 1.05rem !important;
     line-height: 1.2 !important;
+    text-align: center !important;
 }
 
 .stMetric [data-testid="stMetricLabel"] {
     font-size: 0.72rem !important;
     color: #dfe8f3 !important;
+    text-align: center !important;
+}
+
+div[data-testid="metric-container"] {
+    text-align: center !important;
 }
 
 .stDataFrame {
