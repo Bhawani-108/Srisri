@@ -78,6 +78,20 @@ with st.sidebar:
 # ==========================================
 # DASHBOARD DISPLAY & LIVE REFRESH FRAGMENT
 # ==========================================
+def ensure_backend_data_loaded():
+    try:
+        if not os.path.exists(CSV_FILE):
+            with open(CSV_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+
+        if os.path.getsize(CSV_FILE) == 0:
+            current_portfolio = backend_updater.sync_portfolio_registry(None)
+            current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
+    except Exception as e:
+        print(f"Preflight sync warning: {e}")
+
+ensure_backend_data_loaded()
+
 st.title("📊 Live Portfolio & Market Watchlist")
 st.caption("Live feed via Angel One SmartAPI • Streaming updates every 2s")
 st.divider()
@@ -85,6 +99,7 @@ st.divider()
 @st.fragment(run_every="2s")
 def live_dashboard_matrix():
     try:
+        ensure_backend_data_loaded()
         df = pd.read_csv(CSV_FILE)
         
         if 'Type' not in df.columns:
