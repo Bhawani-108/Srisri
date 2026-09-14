@@ -78,7 +78,9 @@ def load_scrip_master():
         print(f"Failed to fetch Scrip Master: {e}")
         return {}, {}
 
-TOKEN_MAP, EXCHANGE_MAP = load_scrip_master()
+_MASTER_MAP = load_scrip_master()
+TOKEN_MAP = _MASTER_MAP[0] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) == 2 else _MASTER_MAP
+EXCHANGE_MAP = _MASTER_MAP[1] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) == 2 else {}
 LAST_WATCHLIST_MTIME = 0
 
 

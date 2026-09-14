@@ -22,8 +22,16 @@ BUY_DATE_FILE = "manual_buy_dates.csv"
 @st.cache_data(ttl=3600)
 def get_searchable_nse_symbols():
     master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
-    symbols = sorted({str(symbol).upper() for symbol in master.keys() if str(symbol).strip()})
-    return symbols
+    exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
+    symbols = []
+    for symbol, token in (master or {}).items():
+        if not str(symbol).strip() or not str(token).strip():
+            continue
+        symbols.append(str(symbol).upper())
+    for symbol, exchange in (exchange_map or {}).items():
+        if str(symbol).strip() and str(exchange).strip() and str(symbol).upper() not in symbols:
+            symbols.append(str(symbol).upper())
+    return sorted(set(symbols))
 
 
 def ensure_manual_buy_date_file():
