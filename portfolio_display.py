@@ -53,19 +53,22 @@ def build_ordered_display_frame(df, row_type="Holding"):
     volume = _safe_numeric(rows.get("Volume"))
     quantity = _safe_numeric(rows.get("Quantity"))
     avg_price = _safe_numeric(rows.get("Average Price"))
+    buy_price_override = _safe_numeric(rows.get("Buy Price"))
+    recorded_buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
     d_pct = _safe_numeric(rows.get("D%"))
     dh_pct = _safe_numeric(rows.get("DH%"))
     s_alert = _safe_numeric(rows.get("SAlert"))
 
     buy_qty = quantity.copy()
-    buy_price = avg_price.copy()
-    buy_date = pd.Series([pd.NA] * len(rows), index=rows.index)
+    buy_price = buy_price_override.fillna(avg_price)
+    buy_date = pd.Series(recorded_buy_date, index=rows.index)
     sell_date = pd.Series([pd.NA] * len(rows), index=rows.index)
     sell_price = pd.Series([pd.NA] * len(rows), index=rows.index)
 
     if is_watchlist:
         buy_qty = pd.Series([pd.NA] * len(rows), index=rows.index)
         buy_price = pd.Series([pd.NA] * len(rows), index=rows.index)
+        buy_date = pd.Series([pd.NA] * len(rows), index=rows.index)
 
     t_buy_price = buy_qty * buy_price
     t_sell_price = sell_price * buy_qty

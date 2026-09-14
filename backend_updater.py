@@ -92,6 +92,15 @@ def sync_portfolio_registry(current_df):
                     if not tok or tok == "0":
                         tok = TOKEN_MAP.get(sym, "")
 
+                    buy_date = (
+                        item.get('buydate') or item.get('buyDate') or item.get('purchaseDate')
+                        or item.get('purchasedate') or item.get('createddate') or item.get('createdDate')
+                    )
+                    buy_price = (
+                        item.get('buyprice') or item.get('buyPrice') or item.get('averageprice')
+                        or item.get('averagePrice') or item.get('lastbuyprice') or item.get('lastBuyPrice')
+                    )
+
                     if sym and tok:
                         seen.add(sym)
                         combined.append({
@@ -100,7 +109,9 @@ def sync_portfolio_registry(current_df):
                             'Token': tok,
                             'Type': 'Holding',
                             'Quantity': float(item.get('quantity', 0)),
-                            'Average Price': float(item.get('averageprice', 0.0))
+                            'Average Price': float(buy_price if buy_price not in (None, '', '0') else 0.0),
+                            'Buy Date': buy_date,
+                            'Buy Price': float(buy_price if buy_price not in (None, '', '0') else 0.0),
                         })
         except Exception as e:
             print(f"Holdings fetch notice: {e}")
