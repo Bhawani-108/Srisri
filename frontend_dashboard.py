@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import backend_updater
+from portfolio_display import build_ordered_display_frame, ORDERED_COLUMNS
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
@@ -133,38 +134,19 @@ def live_dashboard_matrix():
 
         tab1, tab2 = st.tabs(["💼 Demat Holdings", "👀 Market Watchlist"])
 
-        format_dict = {
-            'Average Price': '₹{:,.2f}',
-            'CMP': '₹{:,.2f}',
-            'PC': '₹{:,.2f}',
-            'Day High': '₹{:,.2f}',
-            'Volume': '{:,}',
-            'D%': '{:+.2f}%',
-            'DH%': '{:+.2f}%',
-            'SAlert': '{:+.2f}%',
-            'Total Invested': '₹{:,.2f}',
-            'Current Value': '₹{:,.2f}',
-            'Net P&L': '₹{:,.2f}',
-            'ROI (%)': '{:+.2f}%'
-        }
-
         with tab1:
             if not holdings_df.empty:
-                disp_holdings = holdings_df[[
-                    'Stock Name', 'Quantity', 'Average Price', 'CMP', 'PC', 
-                    'Day High', 'Volume', 'D%', 'DH%', 'SAlert', 
-                    'Total Invested', 'Current Value', 'Net P&L', 'ROI (%)'
-                ]]
-                st.dataframe(disp_holdings.style.format(format_dict), width="stretch")
+                disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
+                disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
+                st.dataframe(disp_holdings, width="stretch", height=500)
             else:
                 st.info("No delivery holdings currently in your Angel One account.")
 
         with tab2:
             if not watchlist_df.empty:
-                disp_watchlist = watchlist_df[[
-                    'Stock Name', 'CMP', 'PC', 'Day High', 'Volume', 'D%', 'DH%', 'SAlert'
-                ]]
-                st.dataframe(disp_watchlist.style.format(format_dict), width="stretch")
+                disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
+                disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
+                st.dataframe(disp_watchlist, width="stretch", height=500)
             else:
                 st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 
