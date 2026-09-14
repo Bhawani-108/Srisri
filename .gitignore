@@ -1,0 +1,15 @@
+# Sensitive credentials
+.streamlit/
+
+# PyInstaller build artifacts
+dist/
+build/
+*.spec
+
+# Logs & cache
+logs/
+__pycache__/
+
+# Dynamic runtime files
+tmp*.csv
+portfolio.csv

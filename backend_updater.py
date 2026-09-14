@@ -9,10 +9,15 @@ from SmartApi import SmartConnect
 # ==========================================
 # CONFIGURATION & BROKER CREDENTIALS
 # ==========================================
-ANGEL_API_KEY = "tFHIr8gX"
-ANGEL_CLIENT_ID = "B59649699"
-ANGEL_PASSWORD = "4190"
-ANGEL_TOTP_SECRET = "LOIQBXVTKZ4AMYQTKDREOIOZX4"  # Paste your generated TOTP here
+import streamlit as st
+
+# ==========================================
+# CONFIGURATION & BROKER CREDENTIALS
+# ==========================================
+ANGEL_API_KEY = st.secrets["ANGEL_API_KEY"]
+ANGEL_CLIENT_ID = st.secrets["ANGEL_CLIENT_ID"]
+ANGEL_PASSWORD = st.secrets["ANGEL_PASSWORD"]
+ANGEL_TOTP_SECRET = st.secrets["ANGEL_TOTP_SECRET"]
 
 CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
