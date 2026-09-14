@@ -1,21 +1,44 @@
 import os
+import threading
+import time
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import backend_updater
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
 CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 
-# Ensure watchlist file exists
+# ==========================================
+# START BACKGROUND ENGINE ON STREAMLIT CLOUD
+# ==========================================
+@st.cache_resource
+def start_background_engine():
+    def run_backend():
+        current_portfolio = None
+        while True:
+            try:
+                current_portfolio = backend_updater.sync_portfolio_registry(current_portfolio)
+                current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
+            except Exception as e:
+                print(f"Engine fault: {e}")
+            time.sleep(3)
+    
+    engine_thread = threading.Thread(target=run_backend, daemon=True)
+    engine_thread.start()
+    return engine_thread
+
+# Initialize the engine (runs once per server instance)
+start_background_engine()
+
 if not os.path.exists(WATCHLIST_FILE):
     with open(WATCHLIST_FILE, "w") as f:
         f.write("")
 
 # ==========================================
 # SIDEBAR: LIVE WATCHLIST CONTROLS
-# (Placed outside the fragment to prevent typing interruption)
 # ==========================================
 with st.sidebar:
     st.header("⚡ Manage Watchlist")
@@ -37,7 +60,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Dynamic removal dropdown
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r") as f:
             active_watchlist = [line.strip().upper() for line in f if line.strip()]
@@ -71,7 +93,6 @@ def live_dashboard_matrix():
         holdings_df = df[df['Type'] == 'Holding'].copy()
         watchlist_df = df[df['Type'] == 'Watchlist'].copy()
 
-        # Metrics for Holdings Only
         total_invested = holdings_df['Total Invested'].sum() if not holdings_df.empty else 0.0
         current_value = holdings_df['Current Value'].sum() if not holdings_df.empty else 0.0
         total_pnl = holdings_df['Net P&L'].sum() if not holdings_df.empty else 0.0
@@ -84,7 +105,6 @@ def live_dashboard_matrix():
         col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
         st.divider()
 
-        # Visualizations (Holdings Only)
         left_col, right_col = st.columns(2)
         with left_col:
             st.subheader("📁 Portfolio Allocation")
@@ -111,7 +131,6 @@ def live_dashboard_matrix():
 
         st.divider()
 
-        # Tabs for Tabular Data
         tab1, tab2 = st.tabs(["💼 Demat Holdings", "👀 Market Watchlist"])
 
         format_dict = {
@@ -149,8 +168,8 @@ def live_dashboard_matrix():
             else:
                 st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 
-    except pd.errors.EmptyDataError:
-        st.info("Syncing with live CSV data stream...")
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        st.info("Booting data engine and syncing live broker stream...")
     except Exception as e:
         st.error(f"Dashboard notice: {e}")
 

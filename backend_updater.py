@@ -4,12 +4,8 @@ import pyotp
 import pandas as pd
 import os
 import tempfile
-from SmartApi import SmartConnect
-
-# ==========================================
-# CONFIGURATION & BROKER CREDENTIALS
-# ==========================================
 import streamlit as st
+from SmartApi import SmartConnect
 
 # ==========================================
 # CONFIGURATION & BROKER CREDENTIALS
@@ -23,9 +19,13 @@ CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
 
-# Initialize watchlist file if not present
+# Initialize files if not present
 if not os.path.exists(WATCHLIST_FILE):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        f.write("")
+
+if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, "w", encoding="utf-8") as f:
         f.write("")
 
 # ==========================================
@@ -57,7 +57,6 @@ def load_scrip_master():
                 sym = str(item.get('symbol', ''))
                 if sym.endswith(('-EQ', '-BE', '-BZ', '-SM')):
                     clean_sym = sym.split('-')[0]
-                    # Prioritize -EQ if multiple series exist
                     if clean_sym not in token_map or sym.endswith('-EQ'):
                         token_map[clean_sym] = str(item['token'])
                         
@@ -84,7 +83,6 @@ def sync_portfolio_registry(current_df):
         combined = []
         seen = set()
 
-        # 1. Angel One Demat Holdings
         try:
             h_res = smart_connect.holding()
             if h_res.get('status') and h_res.get('data'):
@@ -107,7 +105,6 @@ def sync_portfolio_registry(current_df):
         except Exception as e:
             print(f"Holdings fetch notice: {e}")
 
-        # 2. Watchlist Entries
         if os.path.exists(WATCHLIST_FILE):
             with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
                 watch_tickers = [line.strip().upper() for line in f if line.strip()]
@@ -126,7 +123,6 @@ def sync_portfolio_registry(current_df):
 
         new_df = pd.DataFrame(combined)
 
-        # Preserve existing calculated data across structure refreshes
         if current_df is not None and not current_df.empty:
             cols = ['Token', 'CMP', 'PC', 'Day High', 'Volume', 'D%', 'DH%', 'SAlert']
             existing_cols = [c for c in cols if c in current_df.columns]
@@ -170,7 +166,7 @@ def stream_tick_cycle(df):
                     vol_map[t] = int(item.get('tradeVolume', 0))
 
             if len(tokens_list) > BATCH_SIZE:
-                time.sleep(1.0)  # Rate limit margin
+                time.sleep(1.0) 
 
         t_series = df['Token'].astype(str)
         df['CMP'] = t_series.map(cmp_map).fillna(df.get('CMP', 0.0))
@@ -178,18 +174,15 @@ def stream_tick_cycle(df):
         df['Day High'] = t_series.map(high_map).fillna(df.get('Day High', 0.0))
         df['Volume'] = t_series.map(vol_map).fillna(df.get('Volume', 0))
 
-        # Formula Metrics
         df['D%'] = ((df['CMP'] - df['PC']) / df['PC'].replace(0, 1)) * 100
         df['DH%'] = ((df['Day High'] - df['PC']) / df['PC'].replace(0, 1)) * 100
         df['SAlert'] = ((df['CMP'] - df['Day High']) / df['CMP'].replace(0, 1)) * 100
 
-        # Portfolio Values
         df['Total Invested'] = df['Quantity'] * df['Average Price']
         df['Current Value'] = df['Quantity'] * df['CMP']
         df['Net P&L'] = df['Current Value'] - df['Total Invested']
         df['ROI (%)'] = (df['Net P&L'] / df['Total Invested'].replace(0, 1)) * 100
 
-        # Atomic CSV write
         fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(CSV_FILE)), suffix='.csv')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             df.to_csv(f, index=False)
@@ -201,9 +194,6 @@ def stream_tick_cycle(df):
 
     return df
 
-# ==========================================
-# EXECUTION ENTRY POINT
-# ==========================================
 if __name__ == "__main__":
     current_portfolio = None
     print("🚀 Running live market polling engine...")
