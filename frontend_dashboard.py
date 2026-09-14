@@ -14,6 +14,13 @@ WATCHLIST_FILE = "watchlist.txt"
 BUY_DATE_FILE = "manual_buy_dates.csv"
 
 
+@st.cache_data(ttl=3600)
+def get_searchable_nse_symbols():
+    master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
+    symbols = sorted({str(symbol).upper() for symbol in master.keys() if str(symbol).strip()})
+    return symbols
+
+
 def ensure_manual_buy_date_file():
     if not os.path.exists(BUY_DATE_FILE):
         pd.DataFrame(columns=["Stock Name", "Buy Date"]).to_csv(BUY_DATE_FILE, index=False)
@@ -119,13 +126,21 @@ with st.sidebar:
     st.header("⚡ Manage Watchlist")
     
     with st.form(key="add_ticker_form", clear_on_submit=True):
-        new_ticker = st.text_input("Enter NSE Ticker", placeholder="e.g. INFY, TATAPOWER").strip().upper()
+        searchable_symbols = get_searchable_nse_symbols()
+        selected_ticker = st.selectbox(
+            "Search NSE stock",
+            options=searchable_symbols,
+            index=None,
+            placeholder="Type to search any stock...",
+            help="Search from the live Angel One scrip master."
+        )
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
-        
-        if submit_add and new_ticker:
+
+        if submit_add and selected_ticker:
+            new_ticker = str(selected_ticker).strip().upper()
             with open(WATCHLIST_FILE, "r") as f:
                 existing = [line.strip().upper() for line in f if line.strip()]
-            
+
             if new_ticker in existing:
                 st.warning(f"'{new_ticker}' is already on the watchlist.")
             else:
