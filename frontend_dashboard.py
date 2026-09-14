@@ -288,7 +288,7 @@ def live_dashboard_matrix():
                         ledger.to_csv(BUY_DATE_FILE, index=False)
 
                 styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
-                st.dataframe(styled_holdings, use_container_width=True, hide_index=True)
+                st.dataframe(styled_holdings, width="stretch", hide_index=True)
             else:
                 st.info("No delivery holdings currently in your Angel One account.")
 
@@ -297,7 +297,7 @@ def live_dashboard_matrix():
                 disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
                 disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
                 styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
-                st.dataframe(styled_watchlist, use_container_width=True, hide_index=True, height=500)
+                st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
             else:
                 st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 
