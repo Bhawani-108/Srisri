@@ -114,6 +114,13 @@ SEGMENT_MAP = _MASTER_MAP[2] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_M
 LAST_WATCHLIST_MTIME = 0
 
 
+def get_watchlist_mtime_ns(path: str) -> int:
+    try:
+        return os.stat(path).st_mtime_ns
+    except FileNotFoundError:
+        return -1
+
+
 def parse_trade_datetime(value):
     if value is None or value == "":
         return None
@@ -193,7 +200,7 @@ def get_latest_buy_metadata():
 # ==========================================
 def sync_portfolio_registry(current_df):
     global LAST_WATCHLIST_MTIME
-    mtime = os.path.getmtime(WATCHLIST_FILE) if os.path.exists(WATCHLIST_FILE) else 0
+    mtime = get_watchlist_mtime_ns(WATCHLIST_FILE)
 
     if current_df is None or mtime != LAST_WATCHLIST_MTIME:
         LAST_WATCHLIST_MTIME = mtime
