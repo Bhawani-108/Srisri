@@ -167,11 +167,24 @@ def apply_manual_buy_dates(df):
 # ==========================================
 # HIGH-SPEED VECTORIZED STYLER
 # ==========================================
+# ==========================================
+# HIGH-SPEED VECTORIZED STYLER
+# ==========================================
 def style_live_delta_columns(df, columns=("D%", "% Profit")):
     if df is None or df.empty: return df
 
     target_columns = [col for col in columns if col in df.columns]
-    if not target_columns: return df
+
+    # Automatically formats any floating-point number to exactly 2 decimal places
+    def format_2_decimals(val):
+        if isinstance(val, float) and not pd.isna(val):
+            return f"{val:.2f}"
+        return val
+
+    # Apply the decimal formatter to the base styler
+    styler = df.style.format(format_2_decimals)
+
+    if not target_columns: return styler
 
     def highlight_value(val):
         try:
@@ -182,7 +195,7 @@ def style_live_delta_columns(df, columns=("D%", "% Profit")):
             return "background-color: #e5e7eb; color: #111827;"
         except (ValueError, TypeError): return ""
 
-    return df.style.map(highlight_value, subset=target_columns)
+    return styler.map(highlight_value, subset=target_columns)
 
 
 # ==========================================
@@ -279,12 +292,9 @@ with st.sidebar:
                 else:
                     with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
                         f.write(f"{new_ticker}\n")
-                    try:
-                        backend_updater.LAST_WATCHLIST_MTIME = -1
-                        backend_updater.sync_portfolio_registry(None)
-                    except Exception: pass
                     st.success(f"Added '{new_ticker}'. Syncing live feed...")
-                    st.session_state["watchlist_change_pending"] = True
+                    time.sleep(0.5)
+                    st.rerun()
 
     st.divider()
 
@@ -299,12 +309,9 @@ with st.sidebar:
                 updated_list = [s for s in active_watchlist if s != stock_to_remove]
                 with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
                     f.write("\n".join(updated_list) + ("\n" if updated_list else ""))
-                try:
-                    backend_updater.LAST_WATCHLIST_MTIME = -1
-                    backend_updater.sync_portfolio_registry(None)
-                except Exception: pass
                 st.success(f"Removed '{stock_to_remove}'")
-                st.session_state["watchlist_change_pending"] = True
+                time.sleep(0.5)
+                st.rerun()
 
     st.divider()
     st.caption("Double-click a holding's Buy Date cell in the table below to edit it and save it automatically.")
@@ -378,16 +385,11 @@ st.divider()
 # ------------------------------------------
 # VIEW SELECTOR (OUTSIDE REFRESH LOOP)
 # ------------------------------------------
-if "watchlist_change_pending" not in st.session_state:
-    st.session_state["watchlist_change_pending"] = False
-
-if st.session_state.get("watchlist_change_pending"):
-    st.session_state["watchlist_change_pending"] = False
-
 view_mode = st.pills(
     "Select Table View",
     options=["💼 Demat Holdings", "👀 Market Watchlist"],
     default="💼 Demat Holdings",
+    key="view_mode_pills",
     label_visibility="collapsed"
 )
 

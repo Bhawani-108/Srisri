@@ -91,7 +91,6 @@ def load_scrip_master():
 
             if not token: continue
 
-            # KEY UPDATE: Key everything by Symbol AND Exchange so BSE doesn't get overwritten
             unique_key = f"{clean_sym}:{exch}"
 
             if unique_key not in token_map:
@@ -221,7 +220,7 @@ def sync_portfolio_registry(current_df):
         print("Syncing holding positions and updated watchlist entries...")
 
         combined = []
-        seen = set()
+        seen_holdings = set()
         buy_metadata = get_latest_buy_metadata()
 
         try:
@@ -239,7 +238,7 @@ def sync_portfolio_registry(current_df):
                     avg_price = float(item.get('averageprice', 0.0))
 
                     if sym and tok:
-                        seen.add(unique_key)
+                        seen_holdings.add(unique_key)
                         combined.append({
                             'Stock Name': sym,
                             'Exchange': exch,
@@ -253,6 +252,8 @@ def sync_portfolio_registry(current_df):
         except Exception as e:
             print(f"Holdings fetch notice: {e}")
 
+        # Separate tracking for watchlist so items held in portfolio can also be watchlisted
+        seen_watchlist = set()
         if os.path.exists(WATCHLIST_FILE):
             with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
                 watch_tickers = [line.strip().upper() for line in f if line.strip()]
@@ -262,7 +263,6 @@ def sync_portfolio_registry(current_df):
                     sym, exch = entry.split(":", 1)
                     unique_key = entry
                 else:
-                    # Legacy support for old watchlist entries without exchange
                     sym = entry
                     exch = "NSE"
                     unique_key = f"{sym}:NSE"
@@ -271,7 +271,7 @@ def sync_portfolio_registry(current_df):
                         exch = "BSE"
 
                 token = TOKEN_MAP.get(unique_key)
-                if unique_key not in seen and token:
+                if unique_key not in seen_watchlist and token:
                     combined.append({
                         'Stock Name': sym,
                         'Exchange': exch,
@@ -280,7 +280,7 @@ def sync_portfolio_registry(current_df):
                         'Quantity': 0.0,
                         'Average Price': 0.0
                     })
-                    seen.add(unique_key)
+                    seen_watchlist.add(unique_key)
 
         return pd.DataFrame(combined)
     return current_df
@@ -306,14 +306,12 @@ def stream_tick_cycle(df):
         df['Net P&L'] = df['Current Value'] - df['Total Invested']
         df['ROI (%)'] = (df['Net P&L'] / df['Total Invested'].replace(0, 1)) * 100
 
-        # --- NEW ROBUST FILE SAVING LOGIC ---
         temp_path = None
         try:
             fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(CSV_FILE)), suffix='.csv')
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 df.to_csv(f, index=False)
             
-            # Retry loop to handle Windows file locking (waits for frontend to finish reading)
             replaced = False
             for _ in range(5):
                 try:
@@ -321,48 +319,11 @@ def stream_tick_cycle(df):
                     replaced = True
                     break
                 except PermissionError:
-                    time.sleep(0.05) # Wait 50ms and try again
-            
-            if not replaced:
-                # If it's still locked after 5 tries, skip this tick. 
-                # The next tick in 1.5s will update the prices.
-                pass 
-                
+                    time.sleep(0.05)
         finally:
-            # Guaranteed cleanup: Delete the temp file if it still exists
             if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-
-    except Exception as e:
-        print(f"CSV Batch update error: {e}")
-        
-    return df
-    if df is None or df.empty: return df
-    sync_ws_subscriptions(df)
-
-    try:
-        t_series = df['Token'].astype(str)
-        df['CMP'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('CMP')).fillna(df.get('CMP', 0.0))
-        df['PC'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('PC')).fillna(df.get('PC', 0.0))
-        df['Day High'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Day High')).fillna(df.get('Day High', 0.0))
-        df['Volume'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Volume')).fillna(df.get('Volume', 0))
-
-        df['D%'] = ((df['CMP'] - df['PC']) / df['PC'].replace(0, 1)) * 100
-        df['DH%'] = ((df['Day High'] - df['PC']) / df['PC'].replace(0, 1)) * 100
-        df['SAlert'] = ((df['CMP'] - df['Day High']) / df['CMP'].replace(0, 1)) * 100
-
-        df['Total Invested'] = df['Quantity'] * df['Average Price']
-        df['Current Value'] = df['Quantity'] * df['CMP']
-        df['Net P&L'] = df['Current Value'] - df['Total Invested']
-        df['ROI (%)'] = (df['Net P&L'] / df['Total Invested'].replace(0, 1)) * 100
-
-        fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(CSV_FILE)), suffix='.csv')
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            df.to_csv(f, index=False)
-        os.replace(temp_path, CSV_FILE)
+                try: os.remove(temp_path)
+                except Exception: pass
 
     except Exception as e:
         print(f"CSV Batch update error: {e}")
