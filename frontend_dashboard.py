@@ -193,7 +193,12 @@ with st.sidebar:
                 else:
                     with open(WATCHLIST_FILE, "a") as f:
                         f.write(f"{new_ticker}\n")
+                    try:
+                        backend_updater.sync_portfolio_registry(None)
+                    except Exception:
+                        pass
                     st.success(f"Added '{new_ticker}'. Syncing live feed...")
+                    st.rerun()
 
     st.divider()
 
@@ -208,6 +213,10 @@ with st.sidebar:
                 updated_list = [s for s in active_watchlist if s != stock_to_remove]
                 with open(WATCHLIST_FILE, "w") as f:
                     f.write("\n".join(updated_list) + ("\n" if updated_list else ""))
+                try:
+                    backend_updater.sync_portfolio_registry(None)
+                except Exception:
+                    pass
                 st.success(f"Removed '{stock_to_remove}'")
                 st.rerun()
 
