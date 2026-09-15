@@ -158,7 +158,7 @@ with st.sidebar:
 
     category_options = ["All", "EQ", "ETF", "MF", "F&O", "COM", "CUR"]
     category_filter = st.pills(
-        "",
+        "Filter by segment",
         options=category_options,
         default="All",
         selection_mode="single",
@@ -191,14 +191,15 @@ with st.sidebar:
                 if new_ticker in existing:
                     st.warning(f"'{new_ticker}' is already on the watchlist.")
                 else:
-                    with open(WATCHLIST_FILE, "a") as f:
+                    with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
                         f.write(f"{new_ticker}\n")
                     try:
+                        backend_updater.LAST_WATCHLIST_MTIME = -1
                         backend_updater.sync_portfolio_registry(None)
                     except Exception:
                         pass
                     st.success(f"Added '{new_ticker}'. Syncing live feed...")
-                    st.rerun()
+                    st.session_state["watchlist_change_pending"] = True
 
     st.divider()
 
@@ -211,14 +212,15 @@ with st.sidebar:
             stock_to_remove = st.selectbox("Select ticker to remove", active_watchlist)
             if st.button("🗑️ Delete from Watchlist", width="stretch"):
                 updated_list = [s for s in active_watchlist if s != stock_to_remove]
-                with open(WATCHLIST_FILE, "w") as f:
+                with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
                     f.write("\n".join(updated_list) + ("\n" if updated_list else ""))
                 try:
+                    backend_updater.LAST_WATCHLIST_MTIME = -1
                     backend_updater.sync_portfolio_registry(None)
                 except Exception:
                     pass
                 st.success(f"Removed '{stock_to_remove}'")
-                st.rerun()
+                st.session_state["watchlist_change_pending"] = True
 
     st.divider()
     st.caption("Double-click a holding's Buy Date cell in the table below to edit it and save it automatically.")
@@ -238,6 +240,17 @@ def ensure_backend_data_loaded():
     except Exception as e:
         print(f"Preflight sync warning: {e}")
 
+def load_portfolio_snapshot(path: str = CSV_FILE):
+    try:
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        frame = pd.read_csv(path)
+        if frame.empty:
+            return frame
+        return frame
+    except Exception:
+        return pd.DataFrame()
+
 ensure_backend_data_loaded()
 
 st.title("📊 Live Portfolio & Market Watchlist")
@@ -247,11 +260,22 @@ st.divider()
 with st.container():
     chart_toggle = st.toggle("📈 Show Charts", value=False, key="show_chart_panel")
 
+if "watchlist_change_pending" not in st.session_state:
+    st.session_state["watchlist_change_pending"] = False
+
 @st.fragment(run_every="2s")
 def live_dashboard_matrix():
     try:
+        if st.session_state.get("watchlist_change_pending"):
+            st.session_state["watchlist_change_pending"] = False
+            st.rerun()
+
         ensure_backend_data_loaded()
-        df = pd.read_csv(CSV_FILE)
+        df = load_portfolio_snapshot(CSV_FILE)
+        if df.empty:
+            st.info("Syncing backend data stream...")
+            return
+
         df = apply_manual_buy_dates(df)
 
         if 'Type' not in df.columns:
