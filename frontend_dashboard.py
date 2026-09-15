@@ -1,9 +1,11 @@
 import os
 import threading
 import time
+import io
+import requests
+import re
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import backend_updater
 from portfolio_display import build_ordered_display_frame, ORDERED_COLUMNS
 
@@ -11,121 +13,180 @@ st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
 with open("styles.css", "r", encoding="utf-8") as f:
     css = f.read()
-
-st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+st.markdown(f"", unsafe_allow_html=True)
 
 CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 BUY_DATE_FILE = "manual_buy_dates.csv"
 
 
+# ==========================================
+# UNIVERSAL NAMING & SYMBOL MAPPING
+# ==========================================
+@st.cache_data(ttl=86400)
+def get_universal_name_map():
+    name_map = getattr(backend_updater, "BASE_NAME_MAP", {}).copy()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        eq_res = requests.get("https://archives.nseindia.com/content/equities/EQUITY_L.csv", headers=headers, timeout=10)
+        if eq_res.status_code == 200:
+            df_eq = pd.read_csv(io.StringIO(eq_res.text))
+            df_eq.columns = df_eq.columns.str.strip()
+            if 'SYMBOL' in df_eq.columns and 'NAME OF COMPANY' in df_eq.columns:
+                stock_dict = {f"{str(sym).strip()}:NSE": str(name).strip() for sym, name in zip(df_eq['SYMBOL'], df_eq['NAME OF COMPANY'])}
+                name_map.update(stock_dict)
+    except Exception: pass
+
+    try:
+        etf_res = requests.get("https://archives.nseindia.com/content/equities/eq_etfseclist.csv", headers=headers, timeout=10)
+        if etf_res.status_code == 200:
+            df_etf = pd.read_csv(io.StringIO(etf_res.text))
+            df_etf.columns = df_etf.columns.str.strip()
+            if 'Symbol' in df_etf.columns and 'Security Name' in df_etf.columns:
+                etf_dict = {f"{str(sym).strip()}:NSE": str(name).strip() for sym, name in zip(df_etf['Symbol'], df_etf['Security Name'])}
+                name_map.update(etf_dict)
+    except Exception: pass
+
+    return name_map
+
+
+def parse_angel_fo_symbol(symbol, base_name):
+    if not base_name or not symbol.startswith(base_name):
+        return "Derivative Contract", "F&O"
+        
+    remainder = symbol[len(base_name):]
+    match = re.match(r'^(\d{2}[A-Z]{3}\d{2})(.*)$', remainder)
+    
+    if match:
+        expiry = match.group(1)
+        rest = match.group(2)
+        exp_fmt = f"{expiry[:2]}-{expiry[2:5].capitalize()}-{expiry[5:]}"
+        
+        if 'FUT' in rest: return f"{exp_fmt} FUT", "FUT"
+        elif rest.endswith('CE') or rest.endswith('PE'):
+            opt_type = rest[-2:]
+            strike = rest[:-2]
+            if strike.endswith('00') and len(strike) > 3: strike = strike[:-2] + ".00"
+            elif strike.endswith('0') and len(strike) > 3: strike = strike[:-1] + ".0"
+            return f"{exp_fmt} {strike} {opt_type}", "OPT"
+            
+    return "Derivative Contract", "F&O"
+
+
 @st.cache_data(ttl=3600)
-def get_searchable_symbol_options():
+def get_all_indexed_symbols():
     master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
     exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
     segment_map = getattr(backend_updater, "SEGMENT_MAP", {}) or {}
+    universal_names = get_universal_name_map()
 
-    options = []
+    items = []
     seen = set()
-    for symbol, token in (master or {}).items():
-        clean = str(symbol).strip().upper()
-        if not clean or not str(token).strip():
-            continue
-        exchange = str(exchange_map.get(clean, "NSE")).upper()
-        segment = str(segment_map.get(clean, backend_updater.infer_symbol_segment(clean, exchange))).upper()
-        label = f"[{exchange}] {clean} • {segment}"
-        if clean not in seen:
-            seen.add(clean)
-            options.append({"symbol": clean, "exchange": exchange, "segment": segment, "label": label})
+    for unique_key, token in (master or {}).items():
+        if ":" not in unique_key: continue
+        clean, exchange = unique_key.split(":", 1)
+        
+        if not clean or not str(token).strip() or unique_key in seen: continue
+        seen.add(unique_key)
 
-    for symbol, exchange in (exchange_map or {}).items():
-        clean = str(symbol).strip().upper()
-        if not clean or clean in seen:
-            continue
-        exchange_name = str(exchange).upper()
-        segment = str(backend_updater.infer_symbol_segment(clean, exchange_name)).upper()
-        options.append({"symbol": clean, "exchange": exchange_name, "segment": segment, "label": f"[{exchange_name}] {clean} • {segment}"})
+        segment = str(segment_map.get(unique_key, "EQ")).upper()
+        full_name = universal_names.get(unique_key, "")
 
-    exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3}
+        if segment == "F&O":
+            sub_text, fo_tag = parse_angel_fo_symbol(clean, full_name)
+            display_exch = "NSE FO" if exchange == "NFO" else exchange
+            label = f"{clean} [{display_exch} {fo_tag}] • {sub_text}"
+        else:
+            sub_text = full_name if (full_name and full_name.upper() != clean) else "Equity"
+            label = f"{clean} [{exchange} {segment}] • {sub_text}"
+
+        search_key = f"{clean} {full_name} {sub_text}".lower()
+
+        items.append({
+            "unique_key": unique_key,
+            "symbol": clean,
+            "exchange": exchange,
+            "segment": segment,
+            "label": label,
+            "search_key": search_key
+        })
+
+    exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3, "CDS": 4, "NCO": 5, "BFO": 6}
     segment_rank = {"EQ": 0, "ETF": 1, "MF": 2, "F&O": 3, "COM": 4, "CUR": 5}
-    options.sort(key=lambda x: (exchange_rank.get(x["exchange"], 99), segment_rank.get(x["segment"], 99), x["symbol"]))
-    return options
+    items.sort(key=lambda x: (exchange_rank.get(x["exchange"], 99), segment_rank.get(x["segment"], 99), x["symbol"]))
+    return items
 
+
+# ==========================================
+# OPTIMIZED MANUAL BUY DATE HELPERS
+# ==========================================
+_CACHED_MANUAL_BUY_DATES = None
+_LAST_BUY_DATE_MTIME = 0
 
 def ensure_manual_buy_date_file():
     if not os.path.exists(BUY_DATE_FILE):
         pd.DataFrame(columns=["Stock Name", "Buy Date"]).to_csv(BUY_DATE_FILE, index=False)
 
-
 def load_manual_buy_dates():
+    global _CACHED_MANUAL_BUY_DATES, _LAST_BUY_DATE_MTIME
     ensure_manual_buy_date_file()
+    try: current_mtime = os.stat(BUY_DATE_FILE).st_mtime_ns
+    except OSError: current_mtime = -1
+
+    if _CACHED_MANUAL_BUY_DATES is not None and current_mtime == _LAST_BUY_DATE_MTIME:
+        return _CACHED_MANUAL_BUY_DATES
+
     try:
         df = pd.read_csv(BUY_DATE_FILE)
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
+        if df.empty or "Stock Name" not in df.columns or "Buy Date" not in df.columns:
+            _CACHED_MANUAL_BUY_DATES = pd.DataFrame(columns=["Stock Name", "Buy Date"])
+        else:
+            df = df[["Stock Name", "Buy Date"]].copy()
+            df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
+            df["Buy Date"] = pd.to_datetime(df["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            _CACHED_MANUAL_BUY_DATES = df.dropna(subset=["Stock Name", "Buy Date"]).reset_index(drop=True)
+    except Exception:
+        _CACHED_MANUAL_BUY_DATES = pd.DataFrame(columns=["Stock Name", "Buy Date"])
 
-    if df.empty:
-        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
-
-    if "Stock Name" not in df.columns or "Buy Date" not in df.columns:
-        return pd.DataFrame(columns=["Stock Name", "Buy Date"])
-
-    df = df[["Stock Name", "Buy Date"]].copy()
-    df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
-    df["Buy Date"] = pd.to_datetime(df["Buy Date"], errors="coerce")
-    df = df.dropna(subset=["Stock Name", "Buy Date"]).copy()
-    df["Buy Date"] = df["Buy Date"].dt.strftime("%Y-%m-%d")
-    return df.reset_index(drop=True)
-
+    _LAST_BUY_DATE_MTIME = current_mtime
+    return _CACHED_MANUAL_BUY_DATES
 
 def apply_manual_buy_dates(df):
-    if df is None or df.empty:
-        return df
+    if df is None or df.empty: return df
+    manual_dates = load_manual_buy_dates()
+    if manual_dates.empty or "Stock Name" not in df.columns: return df
 
     df = df.copy()
-    manual_dates = load_manual_buy_dates()
-    if manual_dates.empty:
-        return df
-
     mapping = dict(zip(manual_dates["Stock Name"], manual_dates["Buy Date"]))
-    if "Stock Name" in df.columns:
-        df["Buy Date"] = df["Stock Name"].map(mapping).where(pd.notna(df["Stock Name"].map(mapping)), df.get("Buy Date"))
-
+    mapped_series = df["Stock Name"].map(mapping)
+    df["Buy Date"] = mapped_series.where(mapped_series.notna(), df.get("Buy Date"))
     return df
 
 
+# ==========================================
+# HIGH-SPEED VECTORIZED STYLER
+# ==========================================
 def style_live_delta_columns(df, columns=("D%", "% Profit")):
-    if df is None or df.empty:
-        return df
+    if df is None or df.empty: return df
 
-    work_df = df.copy()
-    target_columns = [col for col in columns if col in work_df.columns]
-    if not target_columns:
-        return work_df
+    target_columns = [col for col in columns if col in df.columns]
+    if not target_columns: return df
 
-    for col in target_columns:
-        work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
+    def highlight_value(val):
+        try:
+            num = float(val)
+            if pd.isna(num): return "background-color: #f3f4f6; color: #111827;"
+            if num > 0: return "background-color: #1f9d55; color: white;"
+            if num < 0: return "background-color: #d64545; color: white;"
+            return "background-color: #e5e7eb; color: #111827;"
+        except (ValueError, TypeError): return ""
 
-    def highlight_value(value):
-        if pd.isna(value):
-            return "background-color: #f3f4f6; color: #111827;"
-        if value > 0:
-            return "background-color: #1f9d55; color: white;"
-        if value < 0:
-            return "background-color: #d64545; color: white;"
-        return "background-color: #e5e7eb; color: #111827;"
+    return df.style.map(highlight_value, subset=target_columns)
 
-    def row_style(row):
-        styles = ["" for _ in row]
-        for idx, col_name in enumerate(row.index):
-            if col_name in target_columns:
-                styles[idx] = highlight_value(row[col_name])
-        return styles
-
-    return work_df.style.apply(row_style, axis=1)
 
 # ==========================================
-# START BACKGROUND ENGINE ON STREAMLIT CLOUD
+# START BACKGROUND ENGINE (SINGLETON)
 # ==========================================
 @st.cache_resource
 def start_background_engine():
@@ -135,57 +196,82 @@ def start_background_engine():
             try:
                 current_portfolio = backend_updater.sync_portfolio_registry(current_portfolio)
                 current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
-            except Exception as e:
-                print(f"Engine fault: {e}")
-            time.sleep(3)
+            except Exception as e: print(f"Engine fault: {e}")
+            time.sleep(1.5)
     
     engine_thread = threading.Thread(target=run_backend, daemon=True)
     engine_thread.start()
     return engine_thread
 
-# Initialize the engine (runs once per server instance)
 start_background_engine()
 
 if not os.path.exists(WATCHLIST_FILE):
-    with open(WATCHLIST_FILE, "w") as f:
-        f.write("")
+    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f: f.write("")
+
 
 # ==========================================
-# SIDEBAR: LIVE WATCHLIST CONTROLS
+# SIDEBAR: ANGEL ONE STYLE SEARCH CONTROLS
 # ==========================================
 with st.sidebar:
     st.header("⚡ Manage Watchlist")
 
-    category_options = ["All", "EQ", "ETF", "MF", "F&O", "COM", "CUR"]
-    category_filter = st.pills(
+    search_query = st.text_input(
+        "Search",
+        placeholder="Search e.g. tata, reliance, nifty...",
+        key="global_search_input",
+        label_visibility="collapsed"
+    ).strip().lower()
+
+    ui_category_map = {
+        "All": "All",
+        "Stock": "EQ",
+        "F&O": "F&O",
+        "ETF": "ETF",
+        "Mutual Funds": "MF"
+    }
+    
+    selected_pill = st.pills(
         "Filter by segment",
-        options=category_options,
+        options=list(ui_category_map.keys()),
         default="All",
         selection_mode="single",
         label_visibility="collapsed",
     )
+    category_filter = ui_category_map.get(selected_pill, "All")
+
+    all_symbols = get_all_indexed_symbols()
+    
+    if search_query:
+        matched_items = [
+            item for item in all_symbols
+            if (category_filter == "All" or item["segment"] == category_filter)
+            and (search_query in item["search_key"])
+        ][:60]
+    else:
+        matched_items = [
+            item for item in all_symbols
+            if (category_filter == "All" or item["segment"] == category_filter)
+        ][:60]
 
     with st.form(key="add_ticker_form", clear_on_submit=True):
-        symbol_options = get_searchable_symbol_options()
-        filtered_options = [item for item in symbol_options if category_filter == "All" or item["segment"] == category_filter]
-        display_options = [item["label"] for item in filtered_options]
+        display_options = [item["label"] for item in matched_items]
 
         selected_label = st.selectbox(
-            "Search stock",
+            "Matching Instruments",
             options=display_options,
-            index=None,
-            placeholder="Type to search any stock...",
-            help="Results are grouped by exchange and instrument type, e.g. [NSE] RELIANCE • EQ"
+            index=0 if display_options else None,
+            placeholder="Select instrument to add...",
+            label_visibility="collapsed"
         )
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
 
         if submit_add and selected_label:
-            selected_item = next((item for item in filtered_options if item["label"] == selected_label), None)
+            selected_item = next((item for item in matched_items if item["label"] == selected_label), None)
             if selected_item is None:
-                st.warning("Please choose a valid symbol from the filtered list.")
+                st.warning("Please choose a valid symbol.")
             else:
-                new_ticker = str(selected_item["symbol"]).strip().upper()
-                with open(WATCHLIST_FILE, "r") as f:
+                new_ticker = str(selected_item["unique_key"]).strip().upper()
+                with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
                     existing = [line.strip().upper() for line in f if line.strip()]
 
                 if new_ticker in existing:
@@ -196,15 +282,14 @@ with st.sidebar:
                     try:
                         backend_updater.LAST_WATCHLIST_MTIME = -1
                         backend_updater.sync_portfolio_registry(None)
-                    except Exception:
-                        pass
+                    except Exception: pass
                     st.success(f"Added '{new_ticker}'. Syncing live feed...")
                     st.session_state["watchlist_change_pending"] = True
 
     st.divider()
 
     if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, "r") as f:
+        with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
             active_watchlist = [line.strip().upper() for line in f if line.strip()]
         
         if active_watchlist:
@@ -217,159 +302,135 @@ with st.sidebar:
                 try:
                     backend_updater.LAST_WATCHLIST_MTIME = -1
                     backend_updater.sync_portfolio_registry(None)
-                except Exception:
-                    pass
+                except Exception: pass
                 st.success(f"Removed '{stock_to_remove}'")
                 st.session_state["watchlist_change_pending"] = True
 
     st.divider()
     st.caption("Double-click a holding's Buy Date cell in the table below to edit it and save it automatically.")
 
+
 # ==========================================
-# DASHBOARD DISPLAY & LIVE REFRESH FRAGMENT
+# DASHBOARD DISPLAY & LIVE REFRESH FRAGMENTS
 # ==========================================
 def ensure_backend_data_loaded():
     try:
         if not os.path.exists(CSV_FILE):
-            with open(CSV_FILE, "w", encoding="utf-8") as f:
-                f.write("")
-
+            with open(CSV_FILE, "w", encoding="utf-8") as f: f.write("")
         if os.path.getsize(CSV_FILE) == 0:
             current_portfolio = backend_updater.sync_portfolio_registry(None)
             current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
-    except Exception as e:
-        print(f"Preflight sync warning: {e}")
+    except Exception as e: print(f"Preflight sync warning: {e}")
 
 def load_portfolio_snapshot(path: str = CSV_FILE):
     try:
-        if not os.path.exists(path):
-            return pd.DataFrame()
+        if not os.path.exists(path): return pd.DataFrame()
         frame = pd.read_csv(path)
-        if frame.empty:
-            return frame
-        return frame
-    except Exception:
-        return pd.DataFrame()
+        return frame if not frame.empty else pd.DataFrame()
+    except Exception: return pd.DataFrame()
+
+def get_clean_data():
+    df = load_portfolio_snapshot(CSV_FILE)
+    return apply_manual_buy_dates(df)
 
 ensure_backend_data_loaded()
 
 st.title("📊 Live Portfolio & Market Watchlist")
 st.caption("Live feed via Angel One SmartAPI • Streaming updates every 2s")
+
+# ------------------------------------------
+# STATIC SECTION: DATA EDITOR
+# ------------------------------------------
+with st.expander("✏️ Edit Manual Buy Dates (Click to Expand)", expanded=False):
+    init_df = get_clean_data()
+    init_holdings = init_df[init_df['Type'] == 'Holding'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
+    
+    if not init_holdings.empty:
+        disp_holdings_static = build_ordered_display_frame(init_holdings, "Holding")
+        buy_date_editor = disp_holdings_static[["Stock Name", "Buy Date"]].copy()
+        
+        edited_buy_dates = st.data_editor(
+            buy_date_editor,
+            width="stretch",
+            hide_index=True,
+            disabled=["Stock Name"],
+            key="holdings_buy_date_editor",
+        )
+        
+        if not edited_buy_dates.equals(buy_date_editor):
+            manual_rows = edited_buy_dates[["Stock Name", "Buy Date"]].copy()
+            manual_rows = manual_rows[manual_rows["Stock Name"].notna()].copy()
+            manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
+            manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            manual_rows = manual_rows.dropna(subset=["Buy Date"]).drop_duplicates(subset=["Stock Name"], keep="last")
+
+            if not manual_rows.empty:
+                ledger = load_manual_buy_dates()
+                ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
+                ledger = pd.concat([ledger, manual_rows[["Stock Name", "Buy Date"]]], ignore_index=True)
+                ledger.to_csv(BUY_DATE_FILE, index=False)
+                st.rerun()
+    else:
+        st.info("No holdings available to edit.")
+
 st.divider()
 
-with st.container():
-    chart_toggle = st.toggle("📈 Show Charts", value=False, key="show_chart_panel")
-
+# ------------------------------------------
+# VIEW SELECTOR (OUTSIDE REFRESH LOOP)
+# ------------------------------------------
 if "watchlist_change_pending" not in st.session_state:
     st.session_state["watchlist_change_pending"] = False
 
+if st.session_state.get("watchlist_change_pending"):
+    st.session_state["watchlist_change_pending"] = False
+
+view_mode = st.pills(
+    "Select Table View",
+    options=["💼 Demat Holdings", "👀 Market Watchlist"],
+    default="💼 Demat Holdings",
+    label_visibility="collapsed"
+)
+
+# ------------------------------------------
+# SINGLE OPTIMIZED LIVE FRAGMENT
+# ------------------------------------------
 @st.fragment(run_every="2s")
-def live_dashboard_matrix():
-    try:
-        if st.session_state.get("watchlist_change_pending"):
-            st.session_state["watchlist_change_pending"] = False
-            st.rerun()
+def live_dashboard():
+    df = get_clean_data()
+    if df.empty or 'Type' not in df.columns:
+        st.info("Syncing backend data stream...")
+        return
 
-        ensure_backend_data_loaded()
-        df = load_portfolio_snapshot(CSV_FILE)
-        if df.empty:
-            st.info("Syncing backend data stream...")
-            return
+    holdings_df = df[df['Type'] == 'Holding'].copy().sort_values(by="Stock Name")
+    watchlist_df = df[df['Type'] == 'Watchlist'].copy().sort_values(by="Stock Name")
 
-        df = apply_manual_buy_dates(df)
+    total_invested = holdings_df['Total Invested'].sum() if not holdings_df.empty else 0.0
+    current_value = holdings_df['Current Value'].sum() if not holdings_df.empty else 0.0
+    total_pnl = holdings_df['Net P&L'].sum() if not holdings_df.empty else 0.0
+    portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0) * 100
 
-        if 'Type' not in df.columns:
-            st.info("Syncing backend data stream...")
-            return
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Portfolio Value", f"₹{current_value:,.2f}")
+    col2.metric("Total Invested", f"₹{total_invested:,.2f}")
+    col3.metric("Net Profit / Loss", f"₹{total_pnl:,.2f}", delta=f"₹{total_pnl:,.2f}")
+    col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
+    st.divider()
 
-        holdings_df = df[df['Type'] == 'Holding'].copy()
-        watchlist_df = df[df['Type'] == 'Watchlist'].copy()
+    if view_mode == "💼 Demat Holdings":
+        if not holdings_df.empty:
+            disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
+            disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
+            styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
+            st.dataframe(styled_holdings, width="stretch", hide_index=True)
+        else:
+            st.info("No delivery holdings currently in your Angel One account.")
+    else:
+        if not watchlist_df.empty:
+            disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
+            disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
+            styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
+            st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
+        else:
+            st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 
-        total_invested = holdings_df['Total Invested'].sum() if not holdings_df.empty else 0.0
-        current_value = holdings_df['Current Value'].sum() if not holdings_df.empty else 0.0
-        total_pnl = holdings_df['Net P&L'].sum() if not holdings_df.empty else 0.0
-        portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0) * 100
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Portfolio Value", f"₹{current_value:,.2f}")
-        col2.metric("Total Invested", f"₹{total_invested:,.2f}")
-        col3.metric("Net Profit / Loss", f"₹{total_pnl:,.2f}", delta=f"₹{total_pnl:,.2f}")
-        col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
-        st.divider()
-
-        if chart_toggle:
-            left_col, right_col = st.columns(2)
-            with left_col:
-                st.subheader("📁 Portfolio Allocation")
-                if not holdings_df.empty and current_value > 0:
-                    fig_pie = px.pie(
-                        holdings_df, values='Current Value', names='Stock Name', hole=0.4,
-                        color_discrete_sequence=px.colors.qualitative.Safe
-                    )
-                    fig_pie.update_traces(textinfo='percent+label')
-                    st.plotly_chart(fig_pie, width="stretch")
-                else:
-                    st.info("No active demat holdings found.")
-
-            with right_col:
-                st.subheader("📊 Profit & Loss by Holding (₹)")
-                if not holdings_df.empty and current_value > 0:
-                    fig_bar = px.bar(
-                        holdings_df, x='Stock Name', y='Net P&L', color='Net P&L',
-                        color_continuous_scale=['#FF4B4B', '#00CC96']
-                    )
-                    st.plotly_chart(fig_bar, width="stretch")
-                else:
-                    st.info("No active demat holdings found.")
-
-            st.divider()
-
-        tab1, tab2 = st.tabs(["💼 Demat Holdings", "👀 Market Watchlist"])
-
-        with tab1:
-            if not holdings_df.empty:
-                disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
-                disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
-
-                buy_date_editor = disp_holdings[["Stock Name", "Buy Date"]].copy()
-                edited_buy_dates = st.data_editor(
-                    buy_date_editor,
-                    width="stretch",
-                    hide_index=True,
-                    disabled=["Stock Name"],
-                    key="holdings_buy_date_editor",
-                )
-
-                if not edited_buy_dates.equals(buy_date_editor):
-                    manual_rows = edited_buy_dates[["Stock Name", "Buy Date"]].copy()
-                    manual_rows = manual_rows[manual_rows["Stock Name"].notna()].copy()
-                    manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
-                    manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
-                    manual_rows = manual_rows.dropna(subset=["Buy Date"]).drop_duplicates(subset=["Stock Name"], keep="last")
-
-                    if not manual_rows.empty:
-                        ledger = load_manual_buy_dates()
-                        ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
-                        ledger = pd.concat([ledger, manual_rows[["Stock Name", "Buy Date"]]], ignore_index=True)
-                        ledger.to_csv(BUY_DATE_FILE, index=False)
-
-                styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
-                st.dataframe(styled_holdings, width="stretch", hide_index=True)
-            else:
-                st.info("No delivery holdings currently in your Angel One account.")
-
-        with tab2:
-            if not watchlist_df.empty:
-                disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
-                disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
-                styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
-                st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
-            else:
-                st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
-
-    except (pd.errors.EmptyDataError, FileNotFoundError):
-        st.info("Booting data engine and syncing live broker stream...")
-    except Exception as e:
-        st.error(f"Dashboard notice: {e}")
-
-live_dashboard_matrix()
+live_dashboard()
