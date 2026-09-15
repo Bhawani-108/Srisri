@@ -20,18 +20,33 @@ BUY_DATE_FILE = "manual_buy_dates.csv"
 
 
 @st.cache_data(ttl=3600)
-def get_searchable_nse_symbols():
+def get_searchable_symbol_options():
     master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
     exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
-    symbols = []
+
+    options = []
+    seen = set()
     for symbol, token in (master or {}).items():
-        if not str(symbol).strip() or not str(token).strip():
+        clean = str(symbol).strip().upper()
+        if not clean or not str(token).strip():
             continue
-        symbols.append(str(symbol).upper())
+        exchange = str(exchange_map.get(clean, "NSE")).upper()
+        instrument = "EQ"
+        if exchange == "BSE":
+            instrument = "EQ"
+        label = f"{clean} • {exchange} • {instrument}"
+        if clean not in seen:
+            seen.add(clean)
+            options.append((clean, label))
+
     for symbol, exchange in (exchange_map or {}).items():
-        if str(symbol).strip() and str(exchange).strip() and str(symbol).upper() not in symbols:
-            symbols.append(str(symbol).upper())
-    return sorted(set(symbols))
+        clean = str(symbol).strip().upper()
+        if not clean or clean in seen:
+            continue
+        exchange = str(exchange).upper()
+        options.append((clean, f"{clean} • {exchange} • EQ"))
+
+    return sorted(options, key=lambda x: x[0])
 
 
 def ensure_manual_buy_date_file():
@@ -139,18 +154,20 @@ with st.sidebar:
     st.header("⚡ Manage Watchlist")
     
     with st.form(key="add_ticker_form", clear_on_submit=True):
-        searchable_symbols = get_searchable_nse_symbols()
-        selected_ticker = st.selectbox(
+        symbol_options = get_searchable_symbol_options()
+        display_options = [label for _, label in symbol_options]
+        selected_label = st.selectbox(
             "Search stock",
-            options=searchable_symbols,
+            options=display_options,
             index=None,
             placeholder="Type to search any stock...",
-            help="Search any NSE/BSE instrument from the live Angel One scrip master."
+            help="Each result shows the symbol, exchange, and instrument type. Example: RELIANCE • NSE • EQ"
         )
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
 
-        if submit_add and selected_ticker:
-            new_ticker = str(selected_ticker).strip().upper()
+        if submit_add and selected_label:
+            matching_symbol = next((symbol for symbol, label in symbol_options if label == selected_label), selected_label)
+            new_ticker = str(matching_symbol).strip().upper()
             with open(WATCHLIST_FILE, "r") as f:
                 existing = [line.strip().upper() for line in f if line.strip()]
 
