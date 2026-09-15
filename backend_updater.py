@@ -45,6 +45,27 @@ print("Successfully authenticated with Angel One SmartAPI!")
 # ==========================================
 # TOKEN RESOLVER (SUPPORTS -EQ, -BE, -BZ, -SM)
 # ==========================================
+def infer_symbol_segment(symbol: str, exchange: str | None = None) -> str:
+    text = str(symbol or "").upper().strip()
+    if not text:
+        return "EQ"
+
+    suffix = text.rsplit('-', 1)[-1] if '-' in text else text
+    suffix = suffix.upper()
+
+    if suffix in {"EQ", "BE", "BZ", "SM"}:
+        return "EQ"
+    if any(tag in suffix for tag in ("FUT", "OPT", "CE", "PE")):
+        return "F&O"
+    if any(tag in suffix for tag in ("COM", "CMD")):
+        return "COM"
+    if any(tag in suffix for tag in ("CUR", "USD", "INR")):
+        return "CUR"
+    if exchange and str(exchange).upper() in {"NFO", "MCX"}:
+        return "F&O" if str(exchange).upper() == "NFO" else "COM"
+    return "EQ"
+
+
 def load_scrip_master():
     print("Downloading active Scrip Master from Angel One...")
     try:
@@ -54,6 +75,7 @@ def load_scrip_master():
 
         token_map = {}
         exchange_map = {}
+        segment_map = {}
         for item in scrip_data:
             exch = str(item.get('exch_seg', '')).upper()
             if exch not in {'NSE', 'BSE'}:
@@ -71,16 +93,18 @@ def load_scrip_master():
             if clean_sym not in token_map or (exch == 'NSE' and exchange_map.get(clean_sym) != 'NSE'):
                 token_map[clean_sym] = token
                 exchange_map[clean_sym] = exch
+                segment_map[clean_sym] = infer_symbol_segment(sym, exch)
 
         print(f"Scrip Master indexed: {len(token_map)} active NSE/BSE instruments.")
-        return token_map, exchange_map
+        return token_map, exchange_map, segment_map
     except Exception as e:
         print(f"Failed to fetch Scrip Master: {e}")
-        return {}, {}
+        return {}, {}, {}
 
 _MASTER_MAP = load_scrip_master()
-TOKEN_MAP = _MASTER_MAP[0] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) == 2 else _MASTER_MAP
-EXCHANGE_MAP = _MASTER_MAP[1] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) == 2 else {}
+TOKEN_MAP = _MASTER_MAP[0] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) >= 2 else _MASTER_MAP
+EXCHANGE_MAP = _MASTER_MAP[1] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) >= 2 else {}
+SEGMENT_MAP = _MASTER_MAP[2] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) >= 3 else {}
 LAST_WATCHLIST_MTIME = 0
 
 

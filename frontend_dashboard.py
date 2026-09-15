@@ -23,6 +23,7 @@ BUY_DATE_FILE = "manual_buy_dates.csv"
 def get_searchable_symbol_options():
     master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
     exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
+    segment_map = getattr(backend_updater, "SEGMENT_MAP", {}) or {}
 
     options = []
     seen = set()
@@ -31,22 +32,24 @@ def get_searchable_symbol_options():
         if not clean or not str(token).strip():
             continue
         exchange = str(exchange_map.get(clean, "NSE")).upper()
-        instrument = "EQ"
-        if exchange == "BSE":
-            instrument = "EQ"
-        label = f"{clean} • {exchange} • {instrument}"
+        segment = str(segment_map.get(clean, backend_updater.infer_symbol_segment(clean, exchange))).upper()
+        label = f"[{exchange}] {clean} • {segment}"
         if clean not in seen:
             seen.add(clean)
-            options.append((clean, label))
+            options.append((clean, exchange, segment, label))
 
     for symbol, exchange in (exchange_map or {}).items():
         clean = str(symbol).strip().upper()
         if not clean or clean in seen:
             continue
-        exchange = str(exchange).upper()
-        options.append((clean, f"{clean} • {exchange} • EQ"))
+        exchange_name = str(exchange).upper()
+        segment = str(backend_updater.infer_symbol_segment(clean, exchange_name)).upper()
+        options.append((clean, exchange_name, segment, f"[{exchange_name}] {clean} • {segment}"))
 
-    return sorted(options, key=lambda x: x[0])
+    exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3}
+    segment_rank = {"EQ": 0, "F&O": 1, "COM": 2, "CUR": 3}
+    options.sort(key=lambda x: (exchange_rank.get(x[1], 99), segment_rank.get(x[2], 99), x[0]))
+    return [(symbol, label) for symbol, _, _, label in options]
 
 
 def ensure_manual_buy_date_file():
@@ -161,7 +164,7 @@ with st.sidebar:
             options=display_options,
             index=None,
             placeholder="Type to search any stock...",
-            help="Each result shows the symbol, exchange, and instrument type. Example: RELIANCE • NSE • EQ"
+            help="Results are grouped by exchange and instrument type, e.g. [NSE] RELIANCE • EQ"
         )
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
 
