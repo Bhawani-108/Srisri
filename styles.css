@@ -123,10 +123,72 @@ section[data-testid="stSidebar"] {
 button[kind="secondary"] {
     background: rgba(15, 23, 42, 0.9);
     border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 999px !important;
+    min-height: 32px !important;
+    padding: 0.2rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    color: #dfe8f3 !important;
 }
 
 button[kind="secondary"]:hover {
     border-color: rgba(96, 165, 250, 0.7);
+}
+
+button[kind="primary"] {
+    background: linear-gradient(135deg, #1f9d55, #26c281) !important;
+    border: 1px solid rgba(34, 197, 94, 0.9) !important;
+    border-radius: 999px !important;
+    min-height: 32px !important;
+    padding: 0.2rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+    color: white !important;
+}
+
+div[data-testid="stHorizontalBlock"] {
+    gap: 0.35rem !important;
+    margin-bottom: 0.5rem !important;
+}
+
+div[data-testid="stPills"] {
+    gap: 0.35rem !important;
+    margin-bottom: 0.35rem !important;
+}
+
+div[data-testid="stPills"] button {
+    border-radius: 999px !important;
+    min-height: 30px !important;
+    padding: 0.25rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+}
+
+div[data-baseweb="base-input"] {
+    border-radius: 10px !important;
+    background: rgba(15, 23, 42, 0.8) !important;
+    border: 1px solid rgba(148, 163, 184, 0.22) !important;
+    box-shadow: none !important;
+}
+
+div[data-baseweb="base-input"] input {
+    font-size: 0.8rem !important;
+    color: #edf6ff !important;
+}
+
+div[data-testid="stFormSubmitButton"] button {
+    border-radius: 10px !important;
+    background: linear-gradient(135deg, #1f9d55, #26c281) !important;
+    border: 1px solid rgba(34, 197, 94, 0.9) !important;
+    font-weight: 700 !important;
+}
+
+section[data-testid="stSidebar"] div[data-testid="stBaseButton-secondary"] {
+    border-radius: 999px !important;
+}
+
+section[data-testid="stSidebar"] div[data-testid="stBaseButton-primary"] {
+    border-radius: 999px !important;
 }
 
 .stDataFrame {

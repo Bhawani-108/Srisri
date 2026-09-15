@@ -53,16 +53,22 @@ def infer_symbol_segment(symbol: str, exchange: str | None = None) -> str:
     suffix = text.rsplit('-', 1)[-1] if '-' in text else text
     suffix = suffix.upper()
 
+    if "ETF" in suffix:
+        return "ETF"
+    if "MF" in suffix or "MUTF" in suffix or "MFS" in suffix:
+        return "MF"
     if suffix in {"EQ", "BE", "BZ", "SM"}:
         return "EQ"
     if any(tag in suffix for tag in ("FUT", "OPT", "CE", "PE")):
         return "F&O"
-    if any(tag in suffix for tag in ("COM", "CMD")):
+    if any(tag in suffix for tag in ("COM", "CMD", "GOLD", "SILVER", "CRUDE")):
         return "COM"
     if any(tag in suffix for tag in ("CUR", "USD", "INR")):
         return "CUR"
-    if exchange and str(exchange).upper() in {"NFO", "MCX"}:
-        return "F&O" if str(exchange).upper() == "NFO" else "COM"
+    if exchange and str(exchange).upper() in {"NFO"}:
+        return "F&O"
+    if exchange and str(exchange).upper() in {"MCX"}:
+        return "COM"
     return "EQ"
 
 
@@ -82,7 +88,7 @@ def load_scrip_master():
                 continue
 
             sym = str(item.get('symbol', '')).strip()
-            if not sym or not sym.endswith(('-EQ', '-BE', '-BZ', '-SM')):
+            if not sym:
                 continue
 
             clean_sym = sym.split('-')[0].upper()

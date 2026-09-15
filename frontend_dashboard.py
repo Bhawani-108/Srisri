@@ -36,7 +36,7 @@ def get_searchable_symbol_options():
         label = f"[{exchange}] {clean} • {segment}"
         if clean not in seen:
             seen.add(clean)
-            options.append((clean, exchange, segment, label))
+            options.append({"symbol": clean, "exchange": exchange, "segment": segment, "label": label})
 
     for symbol, exchange in (exchange_map or {}).items():
         clean = str(symbol).strip().upper()
@@ -44,12 +44,12 @@ def get_searchable_symbol_options():
             continue
         exchange_name = str(exchange).upper()
         segment = str(backend_updater.infer_symbol_segment(clean, exchange_name)).upper()
-        options.append((clean, exchange_name, segment, f"[{exchange_name}] {clean} • {segment}"))
+        options.append({"symbol": clean, "exchange": exchange_name, "segment": segment, "label": f"[{exchange_name}] {clean} • {segment}"})
 
     exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3}
-    segment_rank = {"EQ": 0, "F&O": 1, "COM": 2, "CUR": 3}
-    options.sort(key=lambda x: (exchange_rank.get(x[1], 99), segment_rank.get(x[2], 99), x[0]))
-    return [(symbol, label) for symbol, _, _, label in options]
+    segment_rank = {"EQ": 0, "ETF": 1, "MF": 2, "F&O": 3, "COM": 4, "CUR": 5}
+    options.sort(key=lambda x: (exchange_rank.get(x["exchange"], 99), segment_rank.get(x["segment"], 99), x["symbol"]))
+    return options
 
 
 def ensure_manual_buy_date_file():
@@ -155,10 +155,21 @@ if not os.path.exists(WATCHLIST_FILE):
 # ==========================================
 with st.sidebar:
     st.header("⚡ Manage Watchlist")
-    
+
+    category_options = ["All", "EQ", "ETF", "MF", "F&O", "COM", "CUR"]
+    category_filter = st.pills(
+        "",
+        options=category_options,
+        default="All",
+        selection_mode="single",
+        label_visibility="collapsed",
+    )
+
     with st.form(key="add_ticker_form", clear_on_submit=True):
         symbol_options = get_searchable_symbol_options()
-        display_options = [label for _, label in symbol_options]
+        filtered_options = [item for item in symbol_options if category_filter == "All" or item["segment"] == category_filter]
+        display_options = [item["label"] for item in filtered_options]
+
         selected_label = st.selectbox(
             "Search stock",
             options=display_options,
@@ -169,17 +180,20 @@ with st.sidebar:
         submit_add = st.form_submit_button("➕ Add Ticker", width="stretch")
 
         if submit_add and selected_label:
-            matching_symbol = next((symbol for symbol, label in symbol_options if label == selected_label), selected_label)
-            new_ticker = str(matching_symbol).strip().upper()
-            with open(WATCHLIST_FILE, "r") as f:
-                existing = [line.strip().upper() for line in f if line.strip()]
-
-            if new_ticker in existing:
-                st.warning(f"'{new_ticker}' is already on the watchlist.")
+            selected_item = next((item for item in filtered_options if item["label"] == selected_label), None)
+            if selected_item is None:
+                st.warning("Please choose a valid symbol from the filtered list.")
             else:
-                with open(WATCHLIST_FILE, "a") as f:
-                    f.write(f"{new_ticker}\n")
-                st.success(f"Added '{new_ticker}'. Syncing live feed...")
+                new_ticker = str(selected_item["symbol"]).strip().upper()
+                with open(WATCHLIST_FILE, "r") as f:
+                    existing = [line.strip().upper() for line in f if line.strip()]
+
+                if new_ticker in existing:
+                    st.warning(f"'{new_ticker}' is already on the watchlist.")
+                else:
+                    with open(WATCHLIST_FILE, "a") as f:
+                        f.write(f"{new_ticker}\n")
+                    st.success(f"Added '{new_ticker}'. Syncing live feed...")
 
     st.divider()
 
