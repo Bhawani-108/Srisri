@@ -30,6 +30,8 @@ def build_demat_display_frame(df):
     buy_price_override = _safe_numeric(rows.get("Buy Price", pd.NA), index=rows.index)
     
     buy_price = buy_price_override.combine_first(avg_price)
+    buy_price = pd.to_numeric(buy_price, errors="coerce")
+    
     buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
     
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
@@ -72,7 +74,16 @@ def build_demat_display_frame(df):
         "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
     }, columns=ORDERED_COLUMNS)
 
-    return output.fillna("NA")
+    # First fill NaNs with NA for string columns, but KEEP numeric columns strictly numeric
+    output = output.fillna("NA")
+    
+    # Force numeric columns back to float/int so PyArrow never chokes on object/string types
+    numeric_cols = ["CMP", "PC", "Quantity", "Buy Price", "Sell Price", "T. Buy Price", "T. Sell Price", "T-CMP-V", "Profit", "% Profit", "DH%", "D%", "SAlert", "Volume"]
+    for col in numeric_cols:
+        if col in output.columns:
+            output[col] = pd.to_numeric(output[col].replace("NA", pd.NA), errors="coerce")
+
+    return output
 
 def style_demat_table(df):
     if df is None or df.empty: return df
@@ -81,14 +92,13 @@ def style_demat_table(df):
         if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
         return val
 
-    styler = df.style.format(format_2_decimals)
+    styler = df.style.format(format_2_decimals, na_rep="NA")
 
     def highlight_cells(row):
         styles = ['' for _ in row]
         for idx, col_name in enumerate(row.index):
             val = row[col_name]
             
-            # Highlight D% and % Profit
             if col_name in ["D%", "% Profit"]:
                 try:
                     num = float(val)
@@ -97,12 +107,11 @@ def style_demat_table(df):
                     else: styles[idx] = "background-color: #e5e7eb; color: #111827;"
                 except (ValueError, TypeError): pass
             
-            # Highlight SAlert < -5 in Yellow
             elif col_name == "SAlert":
                 try:
                     num = float(val)
                     if num < -5:
-                        styles[idx] = "background-color: #ca8a04; color: white; font-weight: bold;"
+                        styles[idx] = "background-color: #ca8a04; color: white;"
                 except (ValueError, TypeError): pass
                 
         return styles

@@ -14,10 +14,15 @@ def build_watchlist_display_frame(df):
     volume = _safe_numeric(rows.get("Volume", pd.NA), index=rows.index)
     
     quantity = _safe_numeric(rows.get("Quantity", 0), index=rows.index)
-    buy_price = _safe_numeric(rows.get("Buy Price", 0), index=rows.index)
+    
+    buy_price = _safe_numeric(rows.get("Buy Price", pd.NA), index=rows.index)
+    buy_price = pd.to_numeric(buy_price, errors="coerce")
+    
     buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
     
     sell_price = _safe_numeric(rows.get("Sell Price", pd.NA), index=rows.index)
+    sell_price = pd.to_numeric(sell_price, errors="coerce")
+    
     side = rows.get("Side", pd.Series(["LONG"] * len(rows), index=rows.index)).astype(str).str.upper()
     status = rows.get("Status", pd.Series(["OPEN"] * len(rows), index=rows.index)).astype(str).str.upper()
 
@@ -85,7 +90,15 @@ def build_watchlist_display_frame(df):
         "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
     }, columns=ORDERED_COLUMNS)
 
-    return output.fillna("NA")
+    # First fill NaNs with NA for string columns, but KEEP numeric columns strictly numeric
+    output = output.fillna("NA")
+    
+    numeric_cols = ["CMP", "PC", "Quantity", "Buy Price", "Sell Price", "T. Buy Price", "T. Sell Price", "T-CMP-V", "Profit", "% Profit", "DH%", "D%", "SAlert", "Volume"]
+    for col in numeric_cols:
+        if col in output.columns:
+            output[col] = pd.to_numeric(output[col].replace("NA", pd.NA), errors="coerce")
+
+    return output
 
 def style_watchlist_table(df):
     if df is None or df.empty: return df
@@ -94,7 +107,7 @@ def style_watchlist_table(df):
         if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
         return val
 
-    styler = df.style.format(format_2_decimals)
+    styler = df.style.format(format_2_decimals, na_rep="NA")
 
     def highlight_cells(row):
         styles = ['' for _ in row]
@@ -113,7 +126,7 @@ def style_watchlist_table(df):
                 try:
                     num = float(val)
                     if num < -5:
-                        styles[idx] = "background-color: #ca8a04; color: white; font-weight: bold;"
+                        styles[idx] = "background-color: #ca8a04; color: white;"
                 except (ValueError, TypeError): pass
                 
         return styles
