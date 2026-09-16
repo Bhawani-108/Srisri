@@ -45,10 +45,6 @@ def build_ordered_display_frame(df, row_type="Holding"):
     rows = df.copy()
     rows = rows.reset_index(drop=True)
 
-    is_watchlist = str(row_type).lower() == "watchlist" or (
-        "Type" in rows.columns and rows["Type"].astype(str).str.lower().eq("watchlist").any()
-    )
-
     exchange = rows.get("Exchange", pd.Series(["NSE"] * len(rows), index=rows.index))
     exchange = exchange.fillna("NSE").astype(str)
 
@@ -56,24 +52,21 @@ def build_ordered_display_frame(df, row_type="Holding"):
     pc = _safe_numeric(rows.get("PC", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     day_high = _safe_numeric(rows.get("Day High", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     volume = _safe_numeric(rows.get("Volume", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
+    
     quantity = _safe_numeric(rows.get("Quantity", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     avg_price = _safe_numeric(rows.get("Average Price", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     buy_price_override = _safe_numeric(rows.get("Buy Price", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
-    recorded_buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
+    
+    buy_qty = quantity.copy()
+    buy_price = buy_price_override.combine_first(avg_price)
+    buy_date = pd.Series(rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
+    
+    sell_date = pd.Series(rows.get("Sell Date", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
+    sell_price = _safe_numeric(rows.get("Sell Price", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
+
     d_pct = _safe_numeric(rows.get("D%", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
-
-    buy_qty = quantity.copy()
-    buy_price = buy_price_override.combine_first(avg_price)
-    buy_date = pd.Series(recorded_buy_date, index=rows.index)
-    sell_date = pd.Series([pd.NA] * len(rows), index=rows.index)
-    sell_price = pd.Series([pd.NA] * len(rows), index=rows.index)
-
-    if is_watchlist:
-        buy_qty = pd.Series([pd.NA] * len(rows), index=rows.index)
-        buy_price = pd.Series([pd.NA] * len(rows), index=rows.index)
-        buy_date = pd.Series([pd.NA] * len(rows), index=rows.index)
 
     t_buy_price = buy_qty * buy_price
     t_sell_price = sell_price * buy_qty
@@ -112,5 +105,4 @@ def build_ordered_display_frame(df, row_type="Holding"):
         "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
     }, columns=ORDERED_COLUMNS)
 
-    # 40x faster than looping over each column individually
     return output.fillna("NA")
