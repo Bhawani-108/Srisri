@@ -1,0 +1,35 @@
+{
+  "columns": [
+    {"name": "Index", "type": "index", "visible": true},
+    {"name": "Stock Name", "type": "data", "visible": true},
+    {"name": "NSE/BSE etc", "type": "data", "visible": true},
+    {"name": "EQ etc", "type": "data", "visible": true},
+    {"name": "CMP", "type": "numeric", "visible": true},
+    {"name": "PC", "type": "numeric", "visible": true},
+    {"name": "Quantity", "type": "numeric", "visible": true},
+    {"name": "Profit", "type": "formula", "formula": "T_CMP_V - T_Buy_Price", "visible": true},
+    {"name": "% Profit", "type": "formula", "formula": "IF(T_Buy_Price == 0, 0, (Profit / T_Buy_Price) * 100)", "visible": true},
+    {"name": "SAlert", "type": "numeric", "visible": true},
+    {"name": "D%", "type": "formula", "formula": "IF(PC == 0, 0, ((CMP - PC) / PC) * 100)", "visible": true},
+    {"name": "DH%", "type": "numeric", "visible": true},
+    {"name": "M %", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((CMP - PMC) / PMC) * 100)", "visible": true},
+    {"name": "Buy Date", "type": "data", "visible": true},
+    {"name": "Buy Price", "type": "numeric", "visible": true},
+    {"name": "Sell Date", "type": "data", "visible": true},
+    {"name": "Sell Price", "type": "numeric", "visible": true},
+    {"name": "T_Buy_Price", "type": "formula", "formula": "Quantity * Buy_Price", "visible": true},
+    {"name": "T_Sell_Price", "type": "formula", "formula": "Quantity * Sell_Price", "visible": true},
+    {"name": "T_CMP_V", "type": "formula", "formula": "Quantity * CMP", "visible": true},
+    {"name": "PMC", "type": "data", "visible": true},
+    {"name": "PD Volume", "type": "data", "visible": true},
+    {"name": "Volume", "type": "numeric", "visible": true},
+    {"name": "Vol%", "type": "formula", "formula": "IF(PD_Volume == 0, 0, (Volume - PD_Volume) / PD_Volume * 100)", "visible": true},
+    {"name": "FPP(%)", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((T_Sell_Price - T_CMP_V) / T_CMP_V) * 100)", "visible": true},
+    {"name": "Broker", "type": "data", "visible": true}
+
+
+   
+    
+
+  ]
+}

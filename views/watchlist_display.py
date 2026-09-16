@@ -1,9 +1,20 @@
+import numpy as np
 import pandas as pd
-from views.demat_display import ORDERED_COLUMNS, _safe_numeric
+from core.formula_engine import evaluate_formulas, get_configured_column_order
+
+# Exported for frontend_dashboard and backward compatibility
+ORDERED_COLUMNS = get_configured_column_order()
+
+def _safe_numeric(value, index=None):
+    result = pd.to_numeric(value, errors="coerce")
+    if isinstance(result, pd.Series): return result
+    if index is None: return pd.Series([result])
+    return pd.Series([result] * len(index), index=index)
 
 def build_watchlist_display_frame(df):
+    current_order = get_configured_column_order()
     if df is None or df.empty:
-        return pd.DataFrame(columns=ORDERED_COLUMNS)
+        return pd.DataFrame(columns=current_order)
 
     rows = df.copy().reset_index(drop=True)
 
@@ -14,55 +25,19 @@ def build_watchlist_display_frame(df):
     volume = _safe_numeric(rows.get("Volume", pd.NA), index=rows.index)
     
     quantity = _safe_numeric(rows.get("Quantity", 0), index=rows.index)
-    
     buy_price = _safe_numeric(rows.get("Buy Price", pd.NA), index=rows.index)
-    buy_price = pd.to_numeric(buy_price, errors="coerce")
-    
     buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
     
     sell_price = _safe_numeric(rows.get("Sell Price", pd.NA), index=rows.index)
-    sell_price = pd.to_numeric(sell_price, errors="coerce")
-    
     side = rows.get("Side", pd.Series(["LONG"] * len(rows), index=rows.index)).astype(str).str.upper()
     status = rows.get("Status", pd.Series(["OPEN"] * len(rows), index=rows.index)).astype(str).str.upper()
 
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
+    pd_volume = _safe_numeric(rows.get("PD Volume", ), index=rows.index)
 
-    t_buy_price = quantity * buy_price
-    t_cmp_v = pd.Series(0.0, index=rows.index)
-    profit = pd.Series(0.0, index=rows.index)
-
-    for idx in rows.index:
-        q = quantity.loc[idx]
-        bp = buy_price.loc[idx]
-        sp = sell_price.loc[idx]
-        c = cmp.loc[idx]
-        s = side.loc[idx]
-        st_val = status.loc[idx]
-
-        if pd.isna(q) or q == 0:
-            continue
-
-        if st_val == "CLOSED" and not pd.isna(sp):
-            t_cmp_v.loc[idx] = sp * q
-            if s == "SHORT":
-                profit.loc[idx] = (bp - sp) * q
-            else:
-                profit.loc[idx] = (sp - bp) * q
-        else:
-            t_cmp_v.loc[idx] = c * q
-            if s == "SHORT":
-                profit.loc[idx] = (bp - c) * q
-            else:
-                profit.loc[idx] = (c - bp) * q
-
-    pct_profit = pd.Series([pd.NA] * len(rows), index=rows.index)
-    valid_profit = t_buy_price.notna() & (t_buy_price != 0)
-    pct_profit.loc[valid_profit] = (profit.loc[valid_profit] / t_buy_price.loc[valid_profit]) * 100
-
-    output = pd.DataFrame({
+    base_frame = pd.DataFrame({
         "Index": range(1, len(rows) + 1),
         "Stock Name": rows.get("Stock Name", ""),
         "NSE/BSE etc": exchange,
@@ -74,11 +49,6 @@ def build_watchlist_display_frame(df):
         "Buy Price": buy_price,
         "Sell Date": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Sell Price": sell_price,
-        "T. Buy Price": t_buy_price,
-        "T. Sell Price": pd.Series([pd.NA] * len(rows), index=rows.index),
-        "T-CMP-V": t_cmp_v,
-        "Profit": profit,
-        "% Profit": pct_profit,
         "DH%": dh_pct,
         "D%": d_pct,
         "SAlert": s_alert,
@@ -88,26 +58,48 @@ def build_watchlist_display_frame(df):
         "Vol%": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
         "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
-    }, columns=ORDERED_COLUMNS)
+        "Broker": pd.Series(["Angel One"] * len(rows), index=rows.index),
+    })
 
-    # First fill NaNs with NA for string columns, but KEEP numeric columns strictly numeric
-    output = output.fillna("NA")
-    
-    numeric_cols = ["CMP", "PC", "Quantity", "Buy Price", "Sell Price", "T. Buy Price", "T. Sell Price", "T-CMP-V", "Profit", "% Profit", "DH%", "D%", "SAlert", "Volume"]
-    for col in numeric_cols:
-        if col in output.columns:
-            output[col] = pd.to_numeric(output[col].replace("NA", pd.NA), errors="coerce")
+    # Override CMP with Sell Price for closed mock positions
+    for idx in rows.index:
+        q = quantity.loc[idx]
+        sp = sell_price.loc[idx]
+        st_val = status.loc[idx]
+        if pd.notna(q) and q > 0 and st_val == "CLOSED" and pd.notna(sp):
+            base_frame.loc[idx, "CMP"] = sp
+
+    output = evaluate_formulas(base_frame)
+
+    # Invert profits on paper SHORT trades
+    if "Profit" in output.columns:
+        for idx in rows.index:
+            if side.loc[idx] == "SHORT" and pd.notna(output.loc[idx, "Profit"]):
+                output.loc[idx, "Profit"] = -output.loc[idx, "Profit"]
+                if "% Profit" in output.columns and pd.notna(output.loc[idx, "% Profit"]):
+                    output.loc[idx, "% Profit"] = -output.loc[idx, "% Profit"]
+
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume"}
+    for col in output.columns:
+        if col not in non_numeric:
+            output[col] = pd.to_numeric(output[col], errors="coerce")
+
+    if "Index" in output.columns:
+        output["Index"] = pd.to_numeric(output["Index"], errors="coerce").fillna(0).astype(int)
 
     return output
 
 def style_watchlist_table(df):
     if df is None or df.empty: return df
 
-    def format_2_decimals(val):
-        if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
+    def format_cells(val):
+        if isinstance(val, (int, np.integer)):
+            return f"{val}"
+        if isinstance(val, (float, np.floating)) and not pd.isna(val):
+            return f"{val:.2f}"
         return val
 
-    styler = df.style.format(format_2_decimals, na_rep="NA")
+    styler = df.style.format(format_cells, na_rep="NA")
 
     def highlight_cells(row):
         styles = ['' for _ in row]

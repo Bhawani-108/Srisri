@@ -1,11 +1,9 @@
+import numpy as np
 import pandas as pd
+from core.formula_engine import evaluate_formulas, get_configured_column_order
 
-ORDERED_COLUMNS = [
-    "Index", "Stock Name", "NSE/BSE etc", "EQ etc", "CMP", "PC", "Quantity",
-    "Buy Date", "Buy Price", "Sell Date", "Sell Price", "T. Buy Price", "T. Sell Price",
-    "T-CMP-V", "Profit", "% Profit", "DH%", "D%", "SAlert", "placeholder",
-    "PMC", "M %", "Vol%", "Volume", "PD Volume"
-]
+# Exported for frontend_dashboard and backward compatibility
+ORDERED_COLUMNS = get_configured_column_order()
 
 def _safe_numeric(value, index=None):
     result = pd.to_numeric(value, errors="coerce")
@@ -14,8 +12,9 @@ def _safe_numeric(value, index=None):
     return pd.Series([result] * len(index), index=index)
 
 def build_demat_display_frame(df):
+    current_order = get_configured_column_order()
     if df is None or df.empty:
-        return pd.DataFrame(columns=ORDERED_COLUMNS)
+        return pd.DataFrame(columns=current_order)
 
     rows = df.copy().reset_index(drop=True)
 
@@ -37,16 +36,9 @@ def build_demat_display_frame(df):
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
+    pd_volume = _safe_numeric(rows.get("PD Volume", pd.NA), index=rows.index)
 
-    t_buy_price = quantity * buy_price
-    t_cmp_v = cmp * quantity
-    profit = t_cmp_v - t_buy_price
-
-    pct_profit = pd.Series([pd.NA] * len(rows), index=rows.index)
-    valid_profit = t_buy_price.notna() & (t_buy_price != 0)
-    pct_profit.loc[valid_profit] = (profit.loc[valid_profit] / t_buy_price.loc[valid_profit]) * 100
-
-    output = pd.DataFrame({
+    base_frame = pd.DataFrame({
         "Index": range(1, len(rows) + 1),
         "Stock Name": rows.get("Stock Name", ""),
         "NSE/BSE etc": exchange,
@@ -58,11 +50,6 @@ def build_demat_display_frame(df):
         "Buy Price": buy_price,
         "Sell Date": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Sell Price": pd.Series([pd.NA] * len(rows), index=rows.index),
-        "T. Buy Price": t_buy_price,
-        "T. Sell Price": pd.Series([pd.NA] * len(rows), index=rows.index),
-        "T-CMP-V": t_cmp_v,
-        "Profit": profit,
-        "% Profit": pct_profit,
         "DH%": dh_pct,
         "D%": d_pct,
         "SAlert": s_alert,
@@ -72,27 +59,33 @@ def build_demat_display_frame(df):
         "Vol%": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
         "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
-    }, columns=ORDERED_COLUMNS)
+        "Broker": pd.Series(["Angel One"] * len(rows), index=rows.index),
+    })
 
-    # First fill NaNs with NA for string columns, but KEEP numeric columns strictly numeric
-    output = output.fillna("NA")
-    
-    # Force numeric columns back to float/int so PyArrow never chokes on object/string types
-    numeric_cols = ["CMP", "PC", "Quantity", "Buy Price", "Sell Price", "T. Buy Price", "T. Sell Price", "T-CMP-V", "Profit", "% Profit", "DH%", "D%", "SAlert", "Volume"]
-    for col in numeric_cols:
-        if col in output.columns:
-            output[col] = pd.to_numeric(output[col].replace("NA", pd.NA), errors="coerce")
+    output = evaluate_formulas(base_frame)
+
+    # Convert non-metadata columns to numeric; leave string/date/index columns alone
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume"}
+    for col in output.columns:
+        if col not in non_numeric:
+            output[col] = pd.to_numeric(output[col], errors="coerce")
+
+    if "Index" in output.columns:
+        output["Index"] = pd.to_numeric(output["Index"], errors="coerce").fillna(0).astype(int)
 
     return output
 
 def style_demat_table(df):
     if df is None or df.empty: return df
 
-    def format_2_decimals(val):
-        if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
+    def format_cells(val):
+        if isinstance(val, (int, np.integer)):
+            return f"{val}"
+        if isinstance(val, (float, np.floating)) and not pd.isna(val):
+            return f"{val:.2f}"
         return val
 
-    styler = df.style.format(format_2_decimals, na_rep="NA")
+    styler = df.style.format(format_cells, na_rep="NA")
 
     def highlight_cells(row):
         styles = ['' for _ in row]

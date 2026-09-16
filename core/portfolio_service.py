@@ -12,7 +12,7 @@ def apply_mock_portfolio(df):
     mock_mapping = mock_df.set_index("Stock Name")
 
     # Unified override: applies across both Watchlist and Holdings if specified
-    for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]:
+    for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]:
         if col in mock_mapping.columns:
             mapped = df["Stock Name"].map(mock_mapping[col])
             if col not in df.columns:
@@ -53,6 +53,7 @@ def get_clean_data():
         if 'Sell Price' not in df.columns: df['Sell Price'] = pd.NA
         if 'Side' not in df.columns: df['Side'] = 'LONG'
         if 'Status' not in df.columns: df['Status'] = 'OPEN'
+        if 'PD Volume' not in df.columns: df['PD Volume'] = pd.NA
         
         df['Total Invested'] = df['Quantity'] * df['Effective_Buy_Price']
         

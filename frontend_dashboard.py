@@ -5,11 +5,12 @@ import pandas as pd
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 import backend_updater
+from core.formula_engine import get_configured_column_order
 from core.storage_manager import load_column_prefs, save_column_prefs
 from core.portfolio_service import ensure_backend_data_loaded, get_clean_data
 from components.sidebar import render_sidebar
 from components.mock_editor import render_mock_portfolio_editor
-from views.demat_display import build_demat_display_frame, style_demat_table, ORDERED_COLUMNS
+from views.demat_display import build_demat_display_frame, style_demat_table
 from views.watchlist_display import build_watchlist_display_frame, style_watchlist_table
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
@@ -56,14 +57,16 @@ st.divider()
 
 # Centralized Column Visibility Manager
 def update_centralized_prefs():
-    new_visible = [col for col in ORDERED_COLUMNS if st.session_state.get(f"cent_col_chk_{col}", True)]
+    ordered_cols = get_configured_column_order()
+    new_visible = [col for col in ordered_cols if st.session_state.get(f"cent_col_chk_{col}", True)]
     save_column_prefs(new_visible)
 
 with st.expander("👁️ Column Visibility Manager", expanded=False):
     st.caption("Toggle columns on or off. Preferences apply globally to both Demat and Watchlist views:")
-    current_visible_cols = load_column_prefs()
+    configured_order = get_configured_column_order()
+    current_visible_cols = set(load_column_prefs())
     cols_grid = st.columns(4)
-    for idx, col in enumerate(ORDERED_COLUMNS):
+    for idx, col in enumerate(configured_order):
         with cols_grid[idx % 4]:
             st.checkbox(
                 col, 
@@ -108,7 +111,6 @@ def live_dashboard():
         elif view_mode == "👀 Market Watchlist" and 'D%' in active_df.columns:
             day_change_pct = pd.to_numeric(active_df['D%'], errors='coerce').dropna().mean() or 0.0
 
-    # Ensure negative values start with '-' so Streamlit displays red with a down-arrow
     pnl_prefix = "-₹" if total_pnl < 0 else "₹"
     pnl_display = f"{pnl_prefix}{abs(total_pnl):,.2f}"
     pnl_delta = f"-₹{abs(total_pnl):,.2f}" if total_pnl < 0 else f"+₹{abs(total_pnl):,.2f}"
@@ -128,18 +130,19 @@ def live_dashboard():
     st.divider()
 
     visible_cols_set = set(load_column_prefs())
+    active_order = get_configured_column_order()
 
     if view_mode == "💼 Demat Holdings":
         if not holdings_df.empty:
             disp = build_demat_display_frame(holdings_df)
-            active_cols = [c for c in ORDERED_COLUMNS if c in visible_cols_set and c in disp.columns]
+            active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]
             st.dataframe(style_demat_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True)
         else:
             st.info("No delivery holdings currently in your Angel One account.")
     else:
         if not watchlist_df.empty:
             disp = build_watchlist_display_frame(watchlist_df)
-            active_cols = [c for c in ORDERED_COLUMNS if c in visible_cols_set and c in disp.columns]
+            active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]
             st.dataframe(style_watchlist_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True, height=500)
         else:
             st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
