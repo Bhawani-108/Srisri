@@ -210,7 +210,7 @@ def evaluate_formulas(df: pd.DataFrame) -> pd.DataFrame:
     if "Index" in output_df.columns:
         output_df["Index"] = pd.to_numeric(output_df["Index"], errors="coerce").fillna(0).astype(int)
 
-    # Ensure all configured columns exist
+# Ensure all configured columns exist
     for col in _CACHED_DISPLAY_ORDER:
         if col not in output_df.columns:
             output_df[col] = np.nan

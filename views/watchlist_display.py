@@ -35,7 +35,8 @@ def build_watchlist_display_frame(df):
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
-    pd_volume = _safe_numeric(rows.get("PD Volume", ), index=rows.index)
+    # In views/watchlist_display.py -> build_watchlist_display_frame()
+    pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
 
     base_frame = pd.DataFrame({
         "Index": range(1, len(rows) + 1),
@@ -55,9 +56,8 @@ def build_watchlist_display_frame(df):
         "placeholder": pd.Series([pd.NA] * len(rows), index=rows.index),
         "PMC": pd.Series([pd.NA] * len(rows), index=rows.index),
         "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
-        "Vol%": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
-        "PD Volume": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "PD Volume": pd_vol,
         "Broker": pd.Series(["Angel One"] * len(rows), index=rows.index),
     })
 

@@ -2,6 +2,7 @@ import time
 import threading
 import requests
 import pyotp
+import numpy as np
 import pandas as pd
 import os
 import tempfile
@@ -133,6 +134,8 @@ LAST_WATCHLIST_MTIME = 0
 LIVE_TICKS = {}
 WS_APP = None
 SUBSCRIBED_TOKENS = set()
+IS_WS_READY = False
+PENDING_EXCHANGE_GROUPS = {}
 
 def map_exch_to_ws_type(exch):
     mapping = {"NSE": 1, "NFO": 2, "BSE": 3, "MCX": 4, "NCDEX": 5, "CDS": 7}
@@ -148,27 +151,44 @@ def on_data(wsapp, msg):
             vol = int(msg.get('volume_trade_for_the_day', 0))
             
             if ltp > 0:
+                prev_record = LIVE_TICKS.get(token, {})
+                prev_pc = prev_record.get('PC', 0.0)
+                final_pc = close if close > 0 else (prev_pc if prev_pc > 0 else ltp)
+
                 LIVE_TICKS[token] = {
                     'CMP': ltp,
-                    'PC': close if close > 0 else ltp,
-                    'Day High': high,
-                    'Volume': vol
+                    'PC': final_pc,
+                    'Day High': high if high > 0 else ltp,
+                    'Volume': vol if vol > 0 else prev_record.get('Volume', 0)
                 }
     except Exception:
         pass
 
 def on_open(wsapp):
+    global IS_WS_READY, SUBSCRIBED_TOKENS
+    IS_WS_READY = True
     print("🟢 WebSocket Connection Established.")
+    if PENDING_EXCHANGE_GROUPS:
+        try:
+            token_list = [{"exchangeType": k, "tokens": v} for k, v in PENDING_EXCHANGE_GROUPS.items()]
+            wsapp.subscribe("ws_feed", 3, token_list)
+            SUBSCRIBED_TOKENS = set([tok for grp in PENDING_EXCHANGE_GROUPS.values() for tok in grp])
+            print(f"📡 Initialized subscriptions for {len(SUBSCRIBED_TOKENS)} instruments.")
+        except Exception as e:
+            pass
 
 def on_error(wsapp, error):
-    # Gracefully log without terminating
+    global IS_WS_READY
+    IS_WS_READY = False
     print(f"⚠️ WebSocket Notice: {error}")
 
 def on_close(wsapp):
+    global IS_WS_READY
+    IS_WS_READY = False
     print("🔌 WebSocket Closed. Reconnecting...")
 
 def run_websocket():
-    global WS_APP, SUBSCRIBED_TOKENS
+    global WS_APP, IS_WS_READY, SUBSCRIBED_TOKENS
     retry_delay = 5
 
     while True:
@@ -178,20 +198,20 @@ def run_websocket():
                 time.sleep(retry_delay)
                 continue
 
+            IS_WS_READY = False
+            SUBSCRIBED_TOKENS.clear()
+
             WS_APP = SmartWebSocketV2(JWT_TOKEN, ANGEL_API_KEY, ANGEL_CLIENT_ID, FEED_TOKEN)
             WS_APP.on_open = on_open
             WS_APP.on_data = on_data
             WS_APP.on_error = on_error
             WS_APP.on_close = on_close
 
-            # Clear subscribed token tracker on reconnect so all symbols resubscribe
-            SUBSCRIBED_TOKENS.clear()
             WS_APP.connect()
-            
-            # Reset delay on clean exit/disconnect
-            retry_delay = 5
+            time.sleep(retry_delay)
         except Exception as e:
-            print(f"WebSocket reconnect fault: {e}. Retrying in {retry_delay}s...")
+            IS_WS_READY = False
+            print(f"WebSocket session fault: {e}. Retrying in {retry_delay}s...")
             time.sleep(retry_delay)
             if retry_delay >= 15:
                 refresh_broker_session()
@@ -200,8 +220,8 @@ def run_websocket():
 threading.Thread(target=run_websocket, daemon=True).start()
 
 def sync_ws_subscriptions(df):
-    global SUBSCRIBED_TOKENS
-    if df is None or df.empty or WS_APP is None:
+    global SUBSCRIBED_TOKENS, PENDING_EXCHANGE_GROUPS
+    if df is None or df.empty:
         return
 
     current_tokens = set()
@@ -218,15 +238,26 @@ def sync_ws_subscriptions(df):
             if tok not in exchange_groups[exch_code]:
                 exchange_groups[exch_code].append(tok)
 
+    PENDING_EXCHANGE_GROUPS = exchange_groups
     new_tokens = current_tokens - SUBSCRIBED_TOKENS
-    if new_tokens:
+
+    is_socket_live = (
+        IS_WS_READY and 
+        WS_APP is not None and 
+        hasattr(WS_APP, "wsapp") and 
+        WS_APP.wsapp is not None and 
+        getattr(WS_APP.wsapp, "sock", None) is not None and 
+        getattr(WS_APP.wsapp.sock, "connected", False)
+    )
+
+    if new_tokens and is_socket_live:
         try:
             token_list = [{"exchangeType": k, "tokens": v} for k, v in exchange_groups.items()]
             WS_APP.subscribe("ws_feed", 3, token_list)
-            SUBSCRIBED_TOKENS = current_tokens
+            SUBSCRIBED_TOKENS.update(current_tokens)
             print(f"📡 Subscribed to {len(current_tokens)} instruments on WebSocket.")
         except Exception as e:
-            print(f"Subscription notice: {e}")
+            pass
 
 # ==========================================
 # PORTFOLIO SYNC & BATCH WRITER
@@ -283,6 +314,7 @@ def sync_portfolio_registry(current_df):
 
                     buy_meta = buy_metadata.get(sym, {})
                     avg_price = float(item.get('averageprice', 0.0))
+                    close_price = float(item.get('close', 0.0))
 
                     if sym and tok:
                         seen_holdings.add(unique_key)
@@ -293,6 +325,7 @@ def sync_portfolio_registry(current_df):
                             'Type': 'Holding',
                             'Quantity': float(item.get('quantity', 0)),
                             'Average Price': avg_price,
+                            'PC': close_price if close_price > 0 else avg_price,
                             'Buy Date': buy_meta.get('Buy Date'),
                             'Buy Price': buy_meta.get('Buy Price', avg_price),
                         })
@@ -324,7 +357,8 @@ def sync_portfolio_registry(current_df):
                         'Token': token,
                         'Type': 'Watchlist',
                         'Quantity': 0.0,
-                        'Average Price': 0.0
+                        'Average Price': 0.0,
+                        'PC': 0.0
                     })
                     seen_watchlist.add(unique_key)
 
@@ -338,19 +372,41 @@ def stream_tick_cycle(df):
 
     try:
         t_series = df['Token'].astype(str)
-        df['CMP'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('CMP')).fillna(df.get('CMP', 0.0))
-        df['PC'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('PC')).fillna(df.get('PC', 0.0))
-        df['Day High'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Day High')).fillna(df.get('Day High', 0.0))
-        df['Volume'] = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Volume')).fillna(df.get('Volume', 0))
+        
+        tick_cmp = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('CMP'))
+        df['CMP'] = tick_cmp.combine_first(df.get('CMP', pd.Series(0.0, index=df.index))).fillna(0.0)
 
-        df['D%'] = ((df['CMP'] - df['PC']) / df['PC'].replace(0, 1)) * 100
-        df['DH%'] = ((df['Day High'] - df['PC']) / df['PC'].replace(0, 1)) * 100
-        df['SAlert'] = ((df['CMP'] - df['Day High']) / df['CMP'].replace(0, 1)) * 100
+        tick_pc = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('PC'))
+        df['PC'] = tick_pc.combine_first(df.get('PC', pd.Series(0.0, index=df.index))).fillna(0.0)
 
-        df['Total Invested'] = df['Quantity'] * df['Average Price']
-        df['Current Value'] = df['Quantity'] * df['CMP']
+        tick_high = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Day High'))
+        df['Day High'] = tick_high.combine_first(df.get('Day High', pd.Series(0.0, index=df.index))).fillna(df['CMP'])
+
+        tick_vol = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Volume'))
+        df['Volume'] = tick_vol.combine_first(df.get('Volume', pd.Series(0, index=df.index))).fillna(0)
+
+        pc_series = pd.to_numeric(df['PC'], errors='coerce').fillna(0.0)
+        cmp_series = pd.to_numeric(df['CMP'], errors='coerce').fillna(0.0)
+        high_series = pd.to_numeric(df['Day High'], errors='coerce').fillna(cmp_series)
+        qty_series = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0.0)
+        avg_series = pd.to_numeric(df['Average Price'], errors='coerce').fillna(0.0)
+
+        df['CMP'] = cmp_series
+        df['PC'] = pc_series
+        df['Day High'] = high_series
+        df['Quantity'] = qty_series
+        df['Average Price'] = avg_series
+
+        df['D%'] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
+        df['DH%'] = np.where(pc_series > 0, ((high_series - pc_series) / pc_series) * 100, 0.0)
+        df['SAlert'] = np.where(cmp_series > 0, ((cmp_series - high_series) / cmp_series) * 100, 0.0)
+
+        df['Total Invested'] = qty_series * avg_series
+        df['Current Value'] = qty_series * cmp_series
         df['Net P&L'] = df['Current Value'] - df['Total Invested']
-        df['ROI (%)'] = (df['Net P&L'] / df['Total Invested'].replace(0, 1)) * 100
+        
+        invested_series = df['Total Invested']
+        df['ROI (%)'] = np.where(invested_series > 0, (df['Net P&L'] / invested_series) * 100, 0.0)
 
         temp_path = None
         try:
@@ -358,11 +414,9 @@ def stream_tick_cycle(df):
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 df.to_csv(f, index=False)
             
-            replaced = False
             for _ in range(5):
                 try:
                     os.replace(temp_path, CSV_FILE)
-                    replaced = True
                     break
                 except PermissionError:
                     time.sleep(0.05)

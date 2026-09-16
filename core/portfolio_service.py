@@ -11,8 +11,9 @@ def apply_mock_portfolio(df):
     df = df.copy()
     mock_mapping = mock_df.set_index("Stock Name")
 
-    # Unified override: applies across both Watchlist and Holdings if specified
-    for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]:
+    # Include 'PD Volume' in the override fields
+    override_cols = ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
+    for col in override_cols:
         if col in mock_mapping.columns:
             mapped = df["Stock Name"].map(mock_mapping[col])
             if col not in df.columns:
