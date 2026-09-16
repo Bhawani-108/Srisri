@@ -388,6 +388,45 @@ else:
         init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
         
         if not init_watchlist.empty:
+            # Ensure columns exist with defaults
+            for col, default_val in [("Buy Date", None), ("Quantity", 100), ("Buy Price", 0.0), 
+                                     ("Sell Price", 0.0), ("Side", "LONG"), ("Status", "OPEN")]:
+                if col not in init_watchlist.columns: 
+                    init_watchlist[col] = default_val
+                    
+            mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]].copy()
+            
+            # Configure data editor with dropdowns for Side and Status
+            edited_mock = st.data_editor(
+                mock_editor_df, 
+                width="stretch", 
+                hide_index=True, 
+                disabled=["Stock Name"], 
+                column_config={
+                    "Side": st.column_config.SelectboxColumn("Side", options=["LONG", "SHORT"], required=True),
+                    "Status": st.column_config.SelectboxColumn("Status", options=["OPEN", "CLOSED"], required=True),
+                },
+                key="mock_editor"
+            )
+            
+            if not edited_mock.equals(mock_editor_df):
+                manual_rows = edited_mock.copy()
+                manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
+                if "Buy Date" in manual_rows.columns: 
+                    manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                
+                ledger = load_mock_portfolio()
+                ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
+                ledger = pd.concat([ledger, manual_rows], ignore_index=True)
+                ledger.to_csv(MOCK_PORTFOLIO_FILE, index=False)
+                st.rerun()
+        else:
+            st.info("Watchlist is empty. Use the sidebar to add stocks to paper trade.")
+    with st.expander("📝 Edit Mock Portfolio (Paper Trading)", expanded=False):
+        init_df = get_clean_data()
+        init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
+        
+        if not init_watchlist.empty:
             for col in ["Buy Date", "Quantity", "Buy Price", "Sell Date", "Sell Price"]:
                 if col not in init_watchlist.columns: init_watchlist[col] = None
                     

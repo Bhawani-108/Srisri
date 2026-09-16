@@ -63,16 +63,45 @@ def build_ordered_display_frame(df, row_type="Holding"):
     
     sell_date = pd.Series(rows.get("Sell Date", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
     sell_price = _safe_numeric(rows.get("Sell Price", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
+    
+    # Read Side (LONG vs SHORT) and Status (OPEN vs CLOSED) if present in mock data
+    side = rows.get("Side", pd.Series(["LONG"] * len(rows), index=rows.index)).astype(str).str.upper()
+    status = rows.get("Status", pd.Series(["OPEN"] * len(rows), index=rows.index)).astype(str).str.upper()
 
-    d_pct = _safe_numeric(rows.get("D%", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
-    dh_pct = _safe_numeric(rows.get("DH%", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
-    s_alert = _safe_numeric(rows.get("SAlert", pd.Series([pd.NA] * len(rows), index=rows.index)), index=rows.index)
-
+    cmp = _safe_numeric(rows.get("CMP", 0))
     t_buy_price = buy_qty * buy_price
-    t_sell_price = sell_price * buy_qty
-    t_cmp_v = cmp * buy_qty
-    profit = t_cmp_v - t_buy_price
 
+    # --- ADVANCED P&L & VALUATION ENGINE ---
+    t_cmp_v = pd.Series(0.0, index=rows.index)
+    profit = pd.Series(0.0, index=rows.index)
+
+    for idx in rows.index:
+        q = buy_qty.loc[idx]
+        bp = buy_price.loc[idx]
+        sp = sell_price.loc[idx]
+        c = cmp.loc[idx]
+        s = side.loc[idx]
+        st_val = status.loc[idx]
+
+        if pd.isna(q) or q == 0:
+            continue
+
+        if st_val == "CLOSED" and not pd.na(sp):
+            # Closed Trade: Valuation and P&L locked to Exit Price
+            t_cmp_v.loc[idx] = sp * q
+            if s == "SHORT":
+                profit.loc[idx] = (bp - sp) * q  # Sold high, bought back low = profit
+            else:
+                profit.loc[idx] = (sp - bp) * q  # Bought low, sold high = profit
+        else:
+            # Open Trade: Valuation driven by live CMP
+            t_cmp_v.loc[idx] = c * q
+            if s == "SHORT":
+                profit.loc[idx] = (bp - c) * q   # Price drops = profit for short
+            else:
+                profit.loc[idx] = (c - bp) * q   # Price rises = profit for long
+
+    t_sell_price = sell_price * buy_qty
     pct_profit = pd.Series([pd.NA] * len(rows), index=rows.index)
     valid_profit = t_buy_price.notna() & (t_buy_price != 0)
     pct_profit.loc[valid_profit] = (profit.loc[valid_profit] / t_buy_price.loc[valid_profit]) * 100
