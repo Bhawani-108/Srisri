@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import io
+import json
 import requests
 import re
 import streamlit as st
@@ -20,6 +21,27 @@ CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 BUY_DATE_FILE = "manual_buy_dates.csv"
 MOCK_PORTFOLIO_FILE = "mock_portfolio.csv"
+COL_PREFS_FILE = "column_prefs.json"
+
+
+# ==========================================
+# PERSISTENT COLUMN PREFERENCES IO
+# ==========================================
+def load_column_prefs():
+    if os.path.exists(COL_PREFS_FILE):
+        try:
+            with open(COL_PREFS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"demat": {}, "watchlist": {}}
+
+def save_column_prefs(prefs):
+    try:
+        with open(COL_PREFS_FILE, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=4)
+    except Exception:
+        pass
 
 
 # ==========================================
@@ -462,17 +484,72 @@ def live_dashboard():
     col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
     st.divider()
 
+    # Load persistent preferences
+    saved_prefs = load_column_prefs()
+
     if view_mode == "💼 Demat Holdings":
         if not holdings_df.empty:
             disp_holdings = build_demat_display_frame(holdings_df)
-            styled_holdings = style_demat_table(disp_holdings)
+            
+            # --- PERSISTENT COLUMN VISIBILITY MANAGER ---
+            with st.expander("👁️ Column Visibility Manager", expanded=False):
+                st.caption("Toggle columns on or off. Preferences are saved automatically:")
+                
+                demat_prefs = saved_prefs.get("demat", {})
+                cols_grid = st.columns(4)
+                
+                prefs_changed = False
+                for idx, col in enumerate(ORDERED_COLUMNS):
+                    if col in disp_holdings.columns:
+                        current_val = demat_prefs.get(col, True)
+                        with cols_grid[idx % 4]:
+                            new_val = st.checkbox(col, value=current_val, key=f"demat_col_chk_{col}")
+                            if new_val != current_val:
+                                demat_prefs[col] = new_val
+                                prefs_changed = True
+                
+                if prefs_changed:
+                    saved_prefs["demat"] = demat_prefs
+                    save_column_prefs(saved_prefs)
+            
+            # Filter columns based on persistent preferences
+            active_cols = [col for col in ORDERED_COLUMNS if saved_prefs.get("demat", {}).get(col, True) and col in disp_holdings.columns]
+            final_disp_holdings = disp_holdings[active_cols] if active_cols else disp_holdings
+            
+            styled_holdings = style_demat_table(final_disp_holdings)
             st.dataframe(styled_holdings, width="stretch", hide_index=True)
         else:
             st.info("No delivery holdings currently in your Angel One account.")
     else:
         if not watchlist_df.empty:
             disp_watchlist = build_watchlist_display_frame(watchlist_df)
-            styled_watchlist = style_watchlist_table(disp_watchlist)
+            
+            # --- PERSISTENT COLUMN VISIBILITY MANAGER ---
+            with st.expander("👁️ Column Visibility Manager", expanded=False):
+                st.caption("Toggle columns on or off. Preferences are saved automatically:")
+                
+                watchlist_prefs = saved_prefs.get("watchlist", {})
+                cols_grid = st.columns(4)
+                
+                prefs_changed = False
+                for idx, col in enumerate(ORDERED_COLUMNS):
+                    if col in disp_watchlist.columns:
+                        current_val = watchlist_prefs.get(col, True)
+                        with cols_grid[idx % 4]:
+                            new_val = st.checkbox(col, value=current_val, key=f"wl_col_chk_{col}")
+                            if new_val != current_val:
+                                watchlist_prefs[col] = new_val
+                                prefs_changed = True
+                
+                if prefs_changed:
+                    saved_prefs["watchlist"] = watchlist_prefs
+                    save_column_prefs(saved_prefs)
+            
+            # Filter columns based on persistent preferences
+            active_cols = [col for col in ORDERED_COLUMNS if saved_prefs.get("watchlist", {}).get(col, True) and col in disp_watchlist.columns]
+            final_disp_watchlist = disp_watchlist[active_cols] if active_cols else disp_watchlist
+            
+            styled_watchlist = style_watchlist_table(final_disp_watchlist)
             st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
         else:
             st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
