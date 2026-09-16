@@ -1,5 +1,5 @@
 {
-    "demat": [
+    "visible_columns": [
         "Index",
         "Stock Name",
         "NSE/BSE etc",
@@ -25,8 +25,5 @@
         "Vol%",
         "Volume",
         "PD Volume"
-    ],
-    "watchlist": [
-        "Stock Name"
     ]
 }
