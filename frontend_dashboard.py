@@ -7,7 +7,8 @@ import re
 import streamlit as st
 import pandas as pd
 import backend_updater
-from portfolio_display import build_ordered_display_frame, ORDERED_COLUMNS
+from demat_display import build_demat_display_frame, ORDERED_COLUMNS
+from watchlist_display import build_watchlist_display_frame
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
@@ -155,7 +156,7 @@ _LAST_MOCK_MTIME = 0
 
 def ensure_mock_portfolio_file():
     if not os.path.exists(MOCK_PORTFOLIO_FILE):
-        pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Date", "Sell Price"]).to_csv(MOCK_PORTFOLIO_FILE, index=False)
+        pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]).to_csv(MOCK_PORTFOLIO_FILE, index=False)
 
 def load_mock_portfolio():
     global _CACHED_MOCK_PORTFOLIO, _LAST_MOCK_MTIME
@@ -167,11 +168,11 @@ def load_mock_portfolio():
     try:
         df = pd.read_csv(MOCK_PORTFOLIO_FILE)
         if df.empty or "Stock Name" not in df.columns:
-            _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Date", "Sell Price"])
+            _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"])
         else:
             df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
             _CACHED_MOCK_PORTFOLIO = df.reset_index(drop=True)
-    except Exception: _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Date", "Sell Price"])
+    except Exception: _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"])
     
     _LAST_MOCK_MTIME = current_mtime
     return _CACHED_MOCK_PORTFOLIO
@@ -185,11 +186,10 @@ def apply_mock_portfolio(df):
     mock_mapping = mock_df.set_index("Stock Name")
     is_watchlist = df["Type"] == "Watchlist"
     
-    for col in ["Buy Date", "Quantity", "Buy Price", "Sell Date", "Sell Price"]:
+    for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]:
         if col in mock_df.columns:
             mapped = df["Stock Name"].map(mock_mapping[col])
             if col not in df.columns: df[col] = pd.NA
-            # Only inject mocked data into Watchlist rows so Demat data is never corrupted
             df.loc[is_watchlist, col] = mapped[is_watchlist].where(mapped[is_watchlist].notna(), df.loc[is_watchlist, col])
             
     return df
@@ -322,7 +322,6 @@ def get_clean_data():
     df = apply_manual_buy_dates(df)
     df = apply_mock_portfolio(df)
     
-    # Recalculate financial metrics since mock portfolio injects Quantities locally
     if not df.empty and 'CMP' in df.columns:
         df['Quantity'] = pd.to_numeric(df.get('Quantity', 0), errors='coerce').fillna(0)
         buy_price_series = pd.to_numeric(df.get('Buy Price', pd.NA), errors='coerce')
@@ -331,8 +330,36 @@ def get_clean_data():
         df['CMP'] = pd.to_numeric(df['CMP'], errors='coerce').fillna(0)
         
         df['Total Invested'] = df['Quantity'] * df['Effective_Buy_Price']
-        df['Current Value'] = df['Quantity'] * df['CMP']
-        df['Net P&L'] = df['Current Value'] - df['Total Invested']
+        
+        # Calculate Current Value & P&L taking Side/Status into account for Watchlist
+        is_wl = df['Type'] == 'Watchlist'
+        df['Current Value'] = df['Total Invested'] # Default baseline
+        
+        for idx in df[is_wl].index:
+            q = df.loc[idx, 'Quantity']
+            bp = df.loc[idx, 'Effective_Buy_Price']
+            sp = pd.to_numeric(df.loc[idx, 'Sell Price'], errors='coerce')
+            c = df.loc[idx, 'CMP']
+            s = str(df.loc[idx, 'Side']).upper()
+            st_val = str(df.loc[idx, 'Status']).upper()
+            
+            if st_val == "CLOSED" and not pd.isna(sp):
+                df.loc[idx, 'Current Value'] = sp * q
+                if s == "SHORT":
+                    df.loc[idx, 'Net P&L'] = (bp - sp) * q
+                else:
+                    df.loc[idx, 'Net P&L'] = (sp - bp) * q
+            else:
+                df.loc[idx, 'Current Value'] = c * q
+                if s == "SHORT":
+                    df.loc[idx, 'Net P&L'] = (bp - c) * q
+                else:
+                    df.loc[idx, 'Net P&L'] = (c - bp) * q
+                    
+        # For Holdings, calculate standard P&L
+        is_hold = df['Type'] == 'Holding'
+        df.loc[is_hold, 'Current Value'] = df.loc[is_hold, 'Quantity'] * df.loc[is_hold, 'CMP']
+        df.loc[is_hold, 'Net P&L'] = df.loc[is_hold, 'Current Value'] - df.loc[is_hold, 'Total Invested']
         
     return df
 
@@ -362,7 +389,7 @@ if view_mode == "💼 Demat Holdings":
         init_holdings = init_df[init_df['Type'] == 'Holding'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
         
         if not init_holdings.empty:
-            disp_holdings_static = build_ordered_display_frame(init_holdings, "Holding")
+            disp_holdings_static = build_demat_display_frame(init_holdings)
             buy_date_editor = disp_holdings_static[["Stock Name", "Buy Date"]].copy()
             
             edited_buy_dates = st.data_editor(buy_date_editor, width="stretch", hide_index=True, disabled=["Stock Name"], key="holdings_editor")
@@ -388,7 +415,6 @@ else:
         init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
         
         if not init_watchlist.empty:
-            # Ensure columns exist with defaults
             for col, default_val in [("Buy Date", None), ("Quantity", 100), ("Buy Price", 0.0), 
                                      ("Sell Price", 0.0), ("Side", "LONG"), ("Status", "OPEN")]:
                 if col not in init_watchlist.columns: 
@@ -396,7 +422,6 @@ else:
                     
             mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]].copy()
             
-            # Configure data editor with dropdowns for Side and Status
             edited_mock = st.data_editor(
                 mock_editor_df, 
                 width="stretch", 
@@ -438,7 +463,6 @@ def live_dashboard():
     holdings_df = df[df['Type'] == 'Holding'].copy().sort_values(by="Stock Name")
     watchlist_df = df[df['Type'] == 'Watchlist'].copy().sort_values(by="Stock Name")
 
-    # DYNAMIC METRICS: Switch metrics calculation based on the active tab
     active_df = holdings_df if view_mode == "💼 Demat Holdings" else watchlist_df
 
     total_invested = active_df['Total Invested'].sum() if not active_df.empty and 'Total Invested' in active_df.columns else 0.0
@@ -455,16 +479,14 @@ def live_dashboard():
 
     if view_mode == "💼 Demat Holdings":
         if not holdings_df.empty:
-            disp_holdings = build_ordered_display_frame(holdings_df, "Holding")
-            disp_holdings = disp_holdings.reindex(columns=ORDERED_COLUMNS)
+            disp_holdings = build_demat_display_frame(holdings_df)
             styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
             st.dataframe(styled_holdings, width="stretch", hide_index=True)
         else:
             st.info("No delivery holdings currently in your Angel One account.")
     else:
         if not watchlist_df.empty:
-            disp_watchlist = build_ordered_display_frame(watchlist_df, "Watchlist")
-            disp_watchlist = disp_watchlist.reindex(columns=ORDERED_COLUMNS)
+            disp_watchlist = build_watchlist_display_frame(watchlist_df)
             styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
             st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
         else:
