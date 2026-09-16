@@ -35,11 +35,11 @@ h3 {
     min-height: 92px !important;
 }
 
+/* Fix long numbers truncating with ellipses in metric cards */
 .stMetric [data-testid="stMetricValue"] {
-    font-size: 1.05rem !important;
-    line-height: 1.2 !important;
-    text-align: center !important;
-    width: 100% !important;
+    font-size: 0.85rem !important;
+    white-space: nowrap !important;
+    overflow: visible !important;
 }
 
 .stMetric [data-testid="stMetricLabel"] {
