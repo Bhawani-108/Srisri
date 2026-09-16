@@ -7,6 +7,7 @@ import requests
 import re
 import streamlit as st
 import pandas as pd
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 import backend_updater
 from demat_display import build_demat_display_frame, style_demat_table, ORDERED_COLUMNS
 from watchlist_display import build_watchlist_display_frame, style_watchlist_table
@@ -32,7 +33,6 @@ def load_column_prefs():
         try:
             with open(COL_PREFS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Handle old dictionary formats or migrate smoothly to a flat list
                 if isinstance(data, dict):
                     if "visible_columns" in data and isinstance(data["visible_columns"], list):
                         return data["visible_columns"]
@@ -245,6 +245,7 @@ def start_background_engine():
             time.sleep(1.5)
     
     engine_thread = threading.Thread(target=run_backend, daemon=True)
+    add_script_run_ctx(engine_thread)
     engine_thread.start()
     return engine_thread
 
@@ -291,6 +292,7 @@ with st.sidebar:
                 if new_ticker in existing: st.warning(f"'{new_ticker}' is already on the watchlist.")
                 else:
                     with open(WATCHLIST_FILE, "a", encoding="utf-8") as f: f.write(f"{new_ticker}\n")
+                    backend_updater.LAST_WATCHLIST_MTIME = 0
                     st.success(f"Added '{new_ticker}'. Syncing live feed...")
                     time.sleep(0.5)
                     st.rerun()
@@ -306,6 +308,7 @@ with st.sidebar:
             if st.button("🗑️ Delete from Watchlist", width="stretch"):
                 updated_list = [s for s in active_watchlist if s != stock_to_remove]
                 with open(WATCHLIST_FILE, "w", encoding="utf-8") as f: f.write("\n".join(updated_list) + ("\n" if updated_list else ""))
+                backend_updater.LAST_WATCHLIST_MTIME = 0
                 st.success(f"Removed '{stock_to_remove}'")
                 time.sleep(0.5)
                 st.rerun()
@@ -430,6 +433,7 @@ if view_mode == "💼 Demat Holdings":
         if not init_holdings.empty:
             disp_holdings_static = build_demat_display_frame(init_holdings)
             buy_date_editor = disp_holdings_static[["Stock Name", "Buy Date"]].copy()
+            buy_date_editor["Buy Date"] = buy_date_editor["Buy Date"].astype("string")
             
             edited_buy_dates = st.data_editor(buy_date_editor, width="stretch", hide_index=True, disabled=["Stock Name"], key="holdings_editor")
             
@@ -450,25 +454,166 @@ if view_mode == "💼 Demat Holdings":
 
 else:
     with st.expander("📝 Edit Mock Portfolio (Paper Trading)", expanded=False):
+        # ----------------------------------------------------
+        # CSV UPLOADER FOR MOCK PORTFOLIO (APPEND & REPLACE)
+        # ----------------------------------------------------
+        st.subheader("📥 Import CSV")
+        uploaded_mock_file = st.file_uploader(
+            "Upload CSV to add or replace mock positions and watchlist",
+            type=["csv"],
+            key="mock_portfolio_csv_uploader"
+        )
+
+        if uploaded_mock_file is not None:
+            col_append, col_replace = st.columns(2)
+            with col_append:
+                do_append = st.button("➕ Append Stocks", width="stretch")
+            with col_replace:
+                do_replace = st.button("🚀 Replace Entire Watchlist", width="stretch")
+
+            if do_append or do_replace:
+                try:
+                    import_df = pd.read_csv(uploaded_mock_file)
+                    import_df.columns = [str(c).strip() for c in import_df.columns]
+
+                    stock_col = next((c for c in ["Stock Name", "Symbol", "Ticker"] if c in import_df.columns), None)
+                    if not stock_col:
+                        stock_col = next((c for c in import_df.columns if "STOCK" in c.upper() or "NAME" in c.upper()), import_df.columns[0])
+
+                    import_df["Stock Name"] = import_df[stock_col].astype(str).str.strip().str.upper()
+                    import_df = import_df[import_df["Stock Name"].str.len() > 0]
+                    import_df = import_df[~import_df["Stock Name"].isin(["NAN", "NONE", "NULL", ""])]
+                    import_df = import_df.dropna(subset=["Stock Name"]).drop_duplicates(subset=["Stock Name"], keep="last")
+
+                    if import_df.empty:
+                        st.error("No valid stock entries found in the uploaded CSV.")
+                    else:
+                        exch_col = next((c for c in ["NSE/BSE etc", "Exchange", "Exch"] if c in import_df.columns), None)
+                        if exch_col:
+                            import_df["Exchange"] = import_df[exch_col].astype(str).str.strip().str.upper().replace({'NAN': 'NSE', 'NONE': 'NSE', '': 'NSE'})
+                        else:
+                            import_df["Exchange"] = "NSE"
+
+                        # Preserve None for missing/blank Side and Status
+                        def safe_parse_side(val):
+                            if pd.isna(val): return None
+                            s = str(val).strip().upper()
+                            if s in ["", "NAN", "NONE", "NULL", ""]: return None
+                            return "SHORT" if "SHORT" in s else "LONG"
+
+                        def safe_parse_status(val):
+                            if pd.isna(val): return None
+                            s = str(val).strip().upper()
+                            if s in ["", "NAN", "NONE", "NULL", ""]: return None
+                            return "CLOSED" if "CLOSE" in s else "OPEN"
+
+                        if "Side" in import_df.columns:
+                            import_df["Side"] = import_df["Side"].apply(safe_parse_side)
+                        else:
+                            import_df["Side"] = None
+
+                        if "Status" in import_df.columns:
+                            import_df["Status"] = import_df["Status"].apply(safe_parse_status)
+                        else:
+                            import_df["Status"] = None
+
+                        # Preserve blanks/NaN for numeric fields
+                        import_df["Quantity"] = pd.to_numeric(import_df.get("Quantity", pd.NA), errors="coerce")
+                        import_df["Buy Price"] = pd.to_numeric(import_df.get("Buy Price", pd.NA), errors="coerce")
+                        import_df["Sell Price"] = pd.to_numeric(import_df.get("Sell Price", pd.NA), errors="coerce")
+
+                        if "Buy Date" in import_df.columns:
+                            parsed_date = pd.to_datetime(import_df["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                            import_df["Buy Date"] = parsed_date.where(parsed_date.notna(), None)
+                        else:
+                            import_df["Buy Date"] = None
+
+                        cols_to_keep = ["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]
+                        prepared_import = import_df[cols_to_keep].copy()
+
+                        new_watchlist_entries = [f"{str(r['Stock Name']).strip()}:{str(r.get('Exchange', 'NSE')).strip()}" for _, r in import_df.iterrows()]
+
+                        if do_replace:
+                            prepared_import.to_csv(MOCK_PORTFOLIO_FILE, index=False)
+                            with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+                                f.write("\n".join(new_watchlist_entries) + "\n")
+                            msg = f"Successfully replaced watchlist with {len(prepared_import)} stocks!"
+                        else:
+                            existing_mock = load_mock_portfolio()
+                            merged_mock = existing_mock[~existing_mock["Stock Name"].isin(prepared_import["Stock Name"])].copy()
+                            merged_mock = pd.concat([merged_mock, prepared_import], ignore_index=True)
+                            merged_mock.to_csv(MOCK_PORTFOLIO_FILE, index=False)
+
+                            existing_wl = []
+                            if os.path.exists(WATCHLIST_FILE):
+                                with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                                    existing_wl = [line.strip().upper() for line in f if line.strip()]
+
+                            existing_set = set(existing_wl)
+                            added_tickers = []
+                            for entry in new_watchlist_entries:
+                                sym = entry.split(":")[0]
+                                if entry not in existing_set and sym not in existing_set:
+                                    added_tickers.append(entry)
+                                    existing_set.add(entry)
+
+                            if added_tickers:
+                                with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
+                                    f.write("\n" + "\n".join(added_tickers) + "\n")
+
+                            msg = f"Appended/updated {len(prepared_import)} stocks in mock portfolio!"
+
+                        backend_updater.LAST_WATCHLIST_MTIME = 0
+                        st.success(f"{msg} Syncing live feed...")
+                        time.sleep(1.0)
+                        st.rerun()
+
+                except Exception as ex:
+                    st.error(f"Failed to process CSV file: {ex}")
+
+        st.divider()
+
+        # ----------------------------------------------------
+        # MANUAL TABLE EDITOR
+        # ----------------------------------------------------
         init_df = get_clean_data()
         init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
         
         if not init_watchlist.empty:
-            for col, default_val in [("Buy Date", None), ("Quantity", 100), ("Buy Price", 0.0), 
-                                     ("Sell Price", 0.0), ("Side", "LONG"), ("Status", "OPEN")]:
+            for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]:
                 if col not in init_watchlist.columns: 
-                    init_watchlist[col] = default_val
+                    init_watchlist[col] = None
                     
             mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]].copy()
             
+            # Clean missing values to None instead of forcing OPEN/LONG
+            def clean_editor_col(val, pos_val, neg_val):
+                if pd.isna(val) or str(val).strip().upper() in ["", "NAN", "NONE", "NULL", ""]:
+                    return None
+                s = str(val).strip().upper()
+                return pos_val if pos_val in s else neg_val
+
+            mock_editor_df["Side"] = mock_editor_df["Side"].apply(lambda x: clean_editor_col(x, "SHORT", "LONG"))
+            mock_editor_df["Status"] = mock_editor_df["Status"].apply(lambda x: clean_editor_col(x, "CLOSED", "OPEN"))
+            mock_editor_df["Quantity"] = pd.to_numeric(mock_editor_df["Quantity"], errors="coerce")
+            mock_editor_df["Buy Price"] = pd.to_numeric(mock_editor_df["Buy Price"], errors="coerce")
+            mock_editor_df["Sell Price"] = pd.to_numeric(mock_editor_df["Sell Price"], errors="coerce")
+            
+            if "Buy Date" in mock_editor_df.columns:
+                mock_editor_df["Buy Date"] = mock_editor_df["Buy Date"].astype("string")
+
             edited_mock = st.data_editor(
                 mock_editor_df, 
                 width="stretch", 
                 hide_index=True, 
                 disabled=["Stock Name"], 
                 column_config={
-                    "Side": st.column_config.SelectboxColumn("Side", options=["LONG", "SHORT"], required=True),
-                    "Status": st.column_config.SelectboxColumn("Status", options=["OPEN", "CLOSED"], required=True),
+                    "Side": st.column_config.SelectboxColumn("Side", options=["LONG", "SHORT"], required=False),
+                    "Status": st.column_config.SelectboxColumn("Status", options=["OPEN", "CLOSED"], required=False),
+                    "Quantity": st.column_config.NumberColumn("Quantity"),
+                    "Buy Price": st.column_config.NumberColumn("Buy Price"),
+                    "Sell Price": st.column_config.NumberColumn("Sell Price"),
+                    "Buy Date": st.column_config.TextColumn("Buy Date"),
                 },
                 key="mock_editor"
             )
@@ -479,13 +624,10 @@ else:
                 if "Buy Date" in manual_rows.columns: 
                     manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
                 
-                ledger = load_mock_portfolio()
-                ledger = ledger[~ledger["Stock Name"].isin(manual_rows["Stock Name"])].copy()
-                ledger = pd.concat([ledger, manual_rows], ignore_index=True)
-                ledger.to_csv(MOCK_PORTFOLIO_FILE, index=False)
+                manual_rows.to_csv(MOCK_PORTFOLIO_FILE, index=False)
                 st.rerun()
         else:
-            st.info("Watchlist is empty. Use the sidebar to add stocks to paper trade.")
+            st.info("Watchlist is empty. Upload a CSV above or use the sidebar to add tickers.")
 
 st.divider()
 
@@ -509,11 +651,30 @@ def live_dashboard():
     total_pnl = active_df['Net P&L'].sum() if not active_df.empty and 'Net P&L' in active_df.columns else 0.0
     portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0) * 100
 
-    col1, col2, col3, col4 = st.columns(4)
+    # Calculate 1D Change
+    day_change_pct = 0.0
+    day_pnl = 0.0
+    if not active_df.empty and 'CMP' in active_df.columns and 'PC' in active_df.columns and 'Quantity' in active_df.columns:
+        prev_close_val = (active_df['Quantity'] * active_df['PC']).sum()
+        curr_val_active = (active_df['Quantity'] * active_df['CMP']).sum()
+        day_pnl = curr_val_active - prev_close_val
+        if prev_close_val > 0:
+            day_change_pct = (day_pnl / prev_close_val) * 100
+        elif view_mode == "👀 Market Watchlist" and 'D%' in active_df.columns:
+            day_change_pct = pd.to_numeric(active_df['D%'], errors='coerce').dropna().mean() or 0.0
+
+    # 5 Summary Metrics with 1D % Change beside Total ROI
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Portfolio Value", f"₹{current_value:,.2f}")
     col2.metric("Total Invested", f"₹{total_invested:,.2f}")
     col3.metric("Net Profit / Loss", f"₹{total_pnl:,.2f}", delta=f"₹{total_pnl:,.2f}")
     col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
+
+    if view_mode == "👀 Market Watchlist" and total_invested == 0:
+        col5.metric("1D % Change (Avg)", f"{day_change_pct:+.2f}%", delta=f"{day_change_pct:+.2f}%")
+    else:
+        col5.metric("1D % Change", f"{day_change_pct:+.2f}%", delta=f"₹{day_pnl:,.2f}")
+
     st.divider()
 
     # Load centralized visible columns
