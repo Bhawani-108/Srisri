@@ -31,17 +31,16 @@ def load_column_prefs():
     if os.path.exists(COL_PREFS_FILE):
         try:
             with open(COL_PREFS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Ensure it's always a dictionary, never a list or string
+                if isinstance(data, dict):
+                    return {
+                        "demat": data.get("demat", {}) if isinstance(data.get("demat"), dict) else {},
+                        "watchlist": data.get("watchlist", {}) if isinstance(data.get("watchlist"), dict) else {}
+                    }
         except Exception:
             pass
     return {"demat": {}, "watchlist": {}}
-
-def save_column_prefs(prefs):
-    try:
-        with open(COL_PREFS_FILE, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, indent=4)
-    except Exception:
-        pass
 
 
 # ==========================================

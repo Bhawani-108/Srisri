@@ -1,0 +1,32 @@
+{
+    "demat": [
+        "Index",
+        "Stock Name",
+        "NSE/BSE etc",
+        "EQ etc",
+        "CMP",
+        "PC",
+        "Quantity",
+        "Buy Date",
+        "Buy Price",
+        "Sell Date",
+        "Sell Price",
+        "T. Buy Price",
+        "T. Sell Price",
+        "T-CMP-V",
+        "Profit",
+        "% Profit",
+        "DH%",
+        "D%",
+        "SAlert",
+        "placeholder",
+        "PMC",
+        "M %",
+        "Vol%",
+        "Volume",
+        "PD Volume"
+    ],
+    "watchlist": [
+        "Stock Name"
+    ]
+}
