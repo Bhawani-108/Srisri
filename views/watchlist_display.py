@@ -1,5 +1,5 @@
 import pandas as pd
-from demat_display import ORDERED_COLUMNS, _safe_numeric
+from views.demat_display import ORDERED_COLUMNS, _safe_numeric
 
 def build_watchlist_display_frame(df):
     if df is None or df.empty:

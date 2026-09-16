@@ -108,33 +108,39 @@ def live_dashboard():
         elif view_mode == "👀 Market Watchlist" and 'D%' in active_df.columns:
             day_change_pct = pd.to_numeric(active_df['D%'], errors='coerce').dropna().mean() or 0.0
 
+    # Ensure negative values start with '-' so Streamlit displays red with a down-arrow
+    pnl_prefix = "-₹" if total_pnl < 0 else "₹"
+    pnl_display = f"{pnl_prefix}{abs(total_pnl):,.2f}"
+    pnl_delta = f"-₹{abs(total_pnl):,.2f}" if total_pnl < 0 else f"+₹{abs(total_pnl):,.2f}"
+
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Portfolio Value", f"₹{current_value:,.2f}")
     col2.metric("Total Invested", f"₹{total_invested:,.2f}")
-    col3.metric("Net Profit / Loss", f"₹{total_pnl:,.2f}", delta=f"₹{total_pnl:,.2f}")
+    col3.metric("Net Profit / Loss", pnl_display, delta=pnl_delta)
     col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
 
     if view_mode == "👀 Market Watchlist" and total_invested == 0:
         col5.metric("1D % Change (Avg)", f"{day_change_pct:+.2f}%", delta=f"{day_change_pct:+.2f}%")
     else:
-        col5.metric("1D % Change", f"{day_change_pct:+.2f}%", delta=f"₹{day_pnl:,.2f}")
+        day_delta_str = f"-₹{abs(day_pnl):,.2f}" if day_pnl < 0 else f"+₹{abs(day_pnl):,.2f}"
+        col5.metric("1D % Change", f"{day_change_pct:+.2f}%", delta=day_delta_str)
 
     st.divider()
 
-    visible_cols_set = load_column_prefs()
+    visible_cols_set = set(load_column_prefs())
 
     if view_mode == "💼 Demat Holdings":
         if not holdings_df.empty:
             disp = build_demat_display_frame(holdings_df)
             active_cols = [c for c in ORDERED_COLUMNS if c in visible_cols_set and c in disp.columns]
-            st.dataframe(style_demat_table(disp[active_cols] if active_cols else disp), width="stretch", hide_index=True)
+            st.dataframe(style_demat_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True)
         else:
             st.info("No delivery holdings currently in your Angel One account.")
     else:
         if not watchlist_df.empty:
             disp = build_watchlist_display_frame(watchlist_df)
             active_cols = [c for c in ORDERED_COLUMNS if c in visible_cols_set and c in disp.columns]
-            st.dataframe(style_watchlist_table(disp[active_cols] if active_cols else disp), width="stretch", hide_index=True, height=500)
+            st.dataframe(style_watchlist_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True, height=500)
         else:
             st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
 

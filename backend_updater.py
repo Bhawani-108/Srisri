@@ -31,22 +31,37 @@ if not os.path.exists(CSV_FILE):
         f.write("")
 
 # ==========================================
-# BROKER AUTHENTICATION
+# BROKER AUTHENTICATION & TOKEN REFRESH
 # ==========================================
 smart_connect = SmartConnect(api_key=ANGEL_API_KEY)
-totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
 
-session = smart_connect.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
-if not session.get('status'):
-    print(f"Login Failed: {session.get('message')}")
-    exit()
+def authenticate():
+    try:
+        totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
+        session = smart_connect.generateSession(ANGEL_CLIENT_ID, ANGEL_PASSWORD, totp)
+        if not session.get('status'):
+            print(f"Login Notice: {session.get('message')}")
+            return None, None
+        
+        feed_token = smart_connect.feed_token or session.get('data', {}).get('feedToken')
+        jwt_token = session.get('data', {}).get('jwtToken')
+        print("Successfully authenticated with Angel One SmartAPI!")
+        return jwt_token, feed_token
+    except Exception as e:
+        print(f"Authentication exception: {e}")
+        return None, None
 
-print("Successfully authenticated with Angel One SmartAPI!")
+JWT_TOKEN, FEED_TOKEN = authenticate()
 
-FEED_TOKEN = smart_connect.feed_token
-JWT_TOKEN = session.get('data', {}).get('jwtToken')
-if not FEED_TOKEN:
-    FEED_TOKEN = session.get('data', {}).get('feedToken')
+def refresh_broker_session():
+    global JWT_TOKEN, FEED_TOKEN
+    new_jwt, new_feed = authenticate()
+    if new_jwt and new_feed:
+        JWT_TOKEN = new_jwt
+        FEED_TOKEN = new_feed
+        print("Broker session tokens renewed.")
+        return True
+    return False
 
 # ==========================================
 # TOKEN RESOLVER & SCRIP MASTER
@@ -105,7 +120,6 @@ def load_scrip_master():
         print(f"Failed to fetch Scrip Master: {e}")
         return {}, {}, {}, {}
 
-
 _MASTER_MAP = load_scrip_master()
 TOKEN_MAP = _MASTER_MAP[0] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) >= 1 else {}
 EXCHANGE_MAP = _MASTER_MAP[1] if isinstance(_MASTER_MAP, tuple) and len(_MASTER_MAP) >= 2 else {}
@@ -140,31 +154,55 @@ def on_data(wsapp, msg):
                     'Day High': high,
                     'Volume': vol
                 }
-    except Exception: pass
+    except Exception:
+        pass
 
-def on_open(wsapp): print("🟢 WebSocket Connection Established.")
-def on_error(wsapp, error): print(f"🔴 WebSocket Error: {error}")
-def on_close(wsapp): print("⚪ WebSocket Connection Closed. Reconnecting...")
+def on_open(wsapp):
+    print("🟢 WebSocket Connection Established.")
+
+def on_error(wsapp, error):
+    # Gracefully log without terminating
+    print(f"⚠️ WebSocket Notice: {error}")
+
+def on_close(wsapp):
+    print("🔌 WebSocket Closed. Reconnecting...")
 
 def run_websocket():
-    global WS_APP
+    global WS_APP, SUBSCRIBED_TOKENS
+    retry_delay = 5
+
     while True:
         try:
+            if not JWT_TOKEN or not FEED_TOKEN:
+                refresh_broker_session()
+                time.sleep(retry_delay)
+                continue
+
             WS_APP = SmartWebSocketV2(JWT_TOKEN, ANGEL_API_KEY, ANGEL_CLIENT_ID, FEED_TOKEN)
             WS_APP.on_open = on_open
             WS_APP.on_data = on_data
             WS_APP.on_error = on_error
             WS_APP.on_close = on_close
+
+            # Clear subscribed token tracker on reconnect so all symbols resubscribe
+            SUBSCRIBED_TOKENS.clear()
             WS_APP.connect()
+            
+            # Reset delay on clean exit/disconnect
+            retry_delay = 5
         except Exception as e:
-            print(f"WebSocket init failed: {e}. Retrying in 5s...")
-            time.sleep(5)
+            print(f"WebSocket reconnect fault: {e}. Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
+            if retry_delay >= 15:
+                refresh_broker_session()
+            retry_delay = min(retry_delay * 2, 60)
 
 threading.Thread(target=run_websocket, daemon=True).start()
 
 def sync_ws_subscriptions(df):
     global SUBSCRIBED_TOKENS
-    if df is None or df.empty or WS_APP is None: return
+    if df is None or df.empty or WS_APP is None:
+        return
 
     current_tokens = set()
     exchange_groups = {}
@@ -175,15 +213,20 @@ def sync_ws_subscriptions(df):
         if tok and exch:
             current_tokens.add(tok)
             exch_code = map_exch_to_ws_type(exch)
-            if exch_code not in exchange_groups: exchange_groups[exch_code] = []
-            if tok not in exchange_groups[exch_code]: exchange_groups[exch_code].append(tok)
+            if exch_code not in exchange_groups:
+                exchange_groups[exch_code] = []
+            if tok not in exchange_groups[exch_code]:
+                exchange_groups[exch_code].append(tok)
 
     new_tokens = current_tokens - SUBSCRIBED_TOKENS
     if new_tokens:
-        token_list = [{"exchangeType": k, "tokens": v} for k, v in exchange_groups.items()]
-        WS_APP.subscribe("ws_feed", 3, token_list)
-        SUBSCRIBED_TOKENS = current_tokens
-        print(f"📡 Subscribed to {len(current_tokens)} instruments on WebSocket.")
+        try:
+            token_list = [{"exchangeType": k, "tokens": v} for k, v in exchange_groups.items()]
+            WS_APP.subscribe("ws_feed", 3, token_list)
+            SUBSCRIBED_TOKENS = current_tokens
+            print(f"📡 Subscribed to {len(current_tokens)} instruments on WebSocket.")
+        except Exception as e:
+            print(f"Subscription notice: {e}")
 
 # ==========================================
 # PORTFOLIO SYNC & BATCH WRITER
@@ -206,14 +249,17 @@ def get_latest_buy_metadata():
                         'Buy Date': item.get('tradedatetime'),
                         'Buy Price': float(item.get('averageprice', 0))
                     }
-    except Exception: pass
+    except Exception:
+        pass
     return buy_meta
 
 def sync_portfolio_registry(current_df):
     global LAST_WATCHLIST_MTIME
     mtime = 0
-    try: mtime = os.stat(WATCHLIST_FILE).st_mtime_ns
-    except FileNotFoundError: pass
+    try:
+        mtime = os.stat(WATCHLIST_FILE).st_mtime_ns
+    except FileNotFoundError:
+        pass
 
     if current_df is None or mtime != LAST_WATCHLIST_MTIME:
         LAST_WATCHLIST_MTIME = mtime
@@ -232,7 +278,8 @@ def sync_portfolio_registry(current_df):
                     
                     unique_key = f"{sym}:{exch}"
                     tok = str(item.get('symboltoken', '')).strip()
-                    if not tok or tok == "0": tok = TOKEN_MAP.get(unique_key, "")
+                    if not tok or tok == "0":
+                        tok = TOKEN_MAP.get(unique_key, "")
 
                     buy_meta = buy_metadata.get(sym, {})
                     avg_price = float(item.get('averageprice', 0.0))
@@ -252,7 +299,6 @@ def sync_portfolio_registry(current_df):
         except Exception as e:
             print(f"Holdings fetch notice: {e}")
 
-        # Separate tracking for watchlist so items held in portfolio can also be watchlisted
         seen_watchlist = set()
         if os.path.exists(WATCHLIST_FILE):
             with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
@@ -285,9 +331,9 @@ def sync_portfolio_registry(current_df):
         return pd.DataFrame(combined)
     return current_df
 
-
 def stream_tick_cycle(df):
-    if df is None or df.empty: return df
+    if df is None or df.empty:
+        return df
     sync_ws_subscriptions(df)
 
     try:
@@ -322,13 +368,14 @@ def stream_tick_cycle(df):
                     time.sleep(0.05)
         finally:
             if temp_path and os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except Exception: pass
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
     except Exception as e:
         print(f"CSV Batch update error: {e}")
     return df
-
 
 if __name__ == "__main__":
     current_portfolio = None
