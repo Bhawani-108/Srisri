@@ -7,8 +7,8 @@ import re
 import streamlit as st
 import pandas as pd
 import backend_updater
-from demat_display import build_demat_display_frame, ORDERED_COLUMNS
-from watchlist_display import build_watchlist_display_frame
+from demat_display import build_demat_display_frame, style_demat_table, ORDERED_COLUMNS
+from watchlist_display import build_watchlist_display_frame, style_watchlist_table
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
@@ -20,6 +20,7 @@ CSV_FILE = "portfolio.csv"
 WATCHLIST_FILE = "watchlist.txt"
 BUY_DATE_FILE = "manual_buy_dates.csv"
 MOCK_PORTFOLIO_FILE = "mock_portfolio.csv"
+
 
 # ==========================================
 # UNIVERSAL NAMING & SYMBOL MAPPING
@@ -51,6 +52,7 @@ def get_universal_name_map():
 
     return name_map
 
+
 def parse_angel_fo_symbol(symbol, base_name):
     if not base_name or not symbol.startswith(base_name): return "Derivative Contract", "F&O"
     remainder = symbol[len(base_name):]
@@ -67,6 +69,7 @@ def parse_angel_fo_symbol(symbol, base_name):
             elif strike.endswith('0') and len(strike) > 3: strike = strike[:-1] + ".0"
             return f"{exp_fmt} {strike} {opt_type}", "OPT"
     return "Derivative Contract", "F&O"
+
 
 @st.cache_data(ttl=3600)
 def get_all_indexed_symbols():
@@ -105,6 +108,7 @@ def get_all_indexed_symbols():
     segment_rank = {"EQ": 0, "ETF": 1, "MF": 2, "F&O": 3, "COM": 4, "CUR": 5}
     items.sort(key=lambda x: (exchange_rank.get(x["exchange"], 99), segment_rank.get(x["segment"], 99), x["symbol"]))
     return items
+
 
 # ==========================================
 # FILE IO: MANUAL HOLDINGS EDIT
@@ -147,6 +151,7 @@ def apply_manual_buy_dates(df):
     mapped_series = df["Stock Name"].map(mapping)
     df["Buy Date"] = mapped_series.where(mapped_series.notna(), df.get("Buy Date"))
     return df
+
 
 # ==========================================
 # FILE IO: WATCHLIST MOCK PORTFOLIO (PAPER TRADING)
@@ -194,30 +199,6 @@ def apply_mock_portfolio(df):
             
     return df
 
-# ==========================================
-# HIGH-SPEED VECTORIZED STYLER
-# ==========================================
-def style_live_delta_columns(df, columns=("D%", "% Profit")):
-    if df is None or df.empty: return df
-    target_columns = [col for col in columns if col in df.columns]
-
-    def format_2_decimals(val):
-        if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
-        return val
-
-    styler = df.style.format(format_2_decimals)
-    if not target_columns: return styler
-
-    def highlight_value(val):
-        try:
-            num = float(val)
-            if pd.isna(num): return "background-color: #f3f4f6; color: #111827;"
-            if num > 0: return "background-color: #1f9d55; color: white;"
-            if num < 0: return "background-color: #d64545; color: white;"
-            return "background-color: #e5e7eb; color: #111827;"
-        except (ValueError, TypeError): return ""
-
-    return styler.map(highlight_value, subset=target_columns)
 
 # ==========================================
 # START BACKGROUND ENGINE (SINGLETON)
@@ -241,6 +222,7 @@ start_background_engine()
 
 if not os.path.exists(WATCHLIST_FILE):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f: f.write("")
+
 
 # ==========================================
 # SIDEBAR: ANGEL ONE STYLE SEARCH CONTROLS
@@ -298,6 +280,7 @@ with st.sidebar:
                 time.sleep(0.5)
                 st.rerun()
 
+
 # ==========================================
 # DASHBOARD DISPLAY & LIVE REFRESH FRAGMENTS
 # ==========================================
@@ -329,11 +312,14 @@ def get_clean_data():
         df['Effective_Buy_Price'] = buy_price_series.combine_first(avg_price_series).fillna(0)
         df['CMP'] = pd.to_numeric(df['CMP'], errors='coerce').fillna(0)
         
+        if 'Sell Price' not in df.columns: df['Sell Price'] = pd.NA
+        if 'Side' not in df.columns: df['Side'] = 'LONG'
+        if 'Status' not in df.columns: df['Status'] = 'OPEN'
+        
         df['Total Invested'] = df['Quantity'] * df['Effective_Buy_Price']
         
-        # Calculate Current Value & P&L taking Side/Status into account for Watchlist
         is_wl = df['Type'] == 'Watchlist'
-        df['Current Value'] = df['Total Invested'] # Default baseline
+        df['Current Value'] = df['Total Invested'] 
         
         for idx in df[is_wl].index:
             q = df.loc[idx, 'Quantity']
@@ -356,7 +342,6 @@ def get_clean_data():
                 else:
                     df.loc[idx, 'Net P&L'] = (c - bp) * q
                     
-        # For Holdings, calculate standard P&L
         is_hold = df['Type'] == 'Holding'
         df.loc[is_hold, 'Current Value'] = df.loc[is_hold, 'Quantity'] * df.loc[is_hold, 'CMP']
         df.loc[is_hold, 'Net P&L'] = df.loc[is_hold, 'Current Value'] - df.loc[is_hold, 'Total Invested']
@@ -480,14 +465,14 @@ def live_dashboard():
     if view_mode == "💼 Demat Holdings":
         if not holdings_df.empty:
             disp_holdings = build_demat_display_frame(holdings_df)
-            styled_holdings = style_live_delta_columns(disp_holdings, ("D%", "% Profit"))
+            styled_holdings = style_demat_table(disp_holdings)
             st.dataframe(styled_holdings, width="stretch", hide_index=True)
         else:
             st.info("No delivery holdings currently in your Angel One account.")
     else:
         if not watchlist_df.empty:
             disp_watchlist = build_watchlist_display_frame(watchlist_df)
-            styled_watchlist = style_live_delta_columns(disp_watchlist, ("D%", "% Profit"))
+            styled_watchlist = style_watchlist_table(disp_watchlist)
             st.dataframe(styled_watchlist, width="stretch", hide_index=True, height=500)
         else:
             st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")

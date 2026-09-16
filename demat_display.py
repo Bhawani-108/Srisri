@@ -73,3 +73,38 @@ def build_demat_display_frame(df):
     }, columns=ORDERED_COLUMNS)
 
     return output.fillna("NA")
+
+def style_demat_table(df):
+    if df is None or df.empty: return df
+
+    def format_2_decimals(val):
+        if isinstance(val, float) and not pd.isna(val): return f"{val:.2f}"
+        return val
+
+    styler = df.style.format(format_2_decimals)
+
+    def highlight_cells(row):
+        styles = ['' for _ in row]
+        for idx, col_name in enumerate(row.index):
+            val = row[col_name]
+            
+            # Highlight D% and % Profit
+            if col_name in ["D%", "% Profit"]:
+                try:
+                    num = float(val)
+                    if num > 0: styles[idx] = "background-color: #1f9d55; color: white;"
+                    elif num < 0: styles[idx] = "background-color: #d64545; color: white;"
+                    else: styles[idx] = "background-color: #e5e7eb; color: #111827;"
+                except (ValueError, TypeError): pass
+            
+            # Highlight SAlert < -5 in Yellow
+            elif col_name == "SAlert":
+                try:
+                    num = float(val)
+                    if num < -5:
+                        styles[idx] = "background-color: #ca8a04; color: white; font-weight: bold;"
+                except (ValueError, TypeError): pass
+                
+        return styles
+
+    return styler.apply(highlight_cells, axis=1)
