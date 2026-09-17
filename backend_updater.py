@@ -11,6 +11,9 @@ import streamlit as st
 from SmartApi import SmartConnect
 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_REFRESH_INTERVAL = 0.5
+
 # ==========================================
 # CONFIGURATION & BROKER CREDENTIALS
 # ==========================================
@@ -19,8 +22,8 @@ ANGEL_CLIENT_ID = st.secrets["ANGEL_CLIENT_ID"]
 ANGEL_PASSWORD = st.secrets["ANGEL_PASSWORD"]
 ANGEL_TOTP_SECRET = st.secrets["ANGEL_TOTP_SECRET"]
 
-CSV_FILE = "portfolio.csv"
-WATCHLIST_FILE = "watchlist.txt"
+CSV_FILE = os.path.join(APP_DIR, "portfolio.csv")
+WATCHLIST_FILE = os.path.join(APP_DIR, "watchlist.txt")
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
 
 if not os.path.exists(WATCHLIST_FILE):
@@ -438,6 +441,6 @@ if __name__ == "__main__":
         while True:
             current_portfolio = sync_portfolio_registry(current_portfolio)
             current_portfolio = stream_tick_cycle(current_portfolio)
-            time.sleep(1.5)
+            time.sleep(DATA_REFRESH_INTERVAL)
     except KeyboardInterrupt:
         print("\nProcess halted by user.")

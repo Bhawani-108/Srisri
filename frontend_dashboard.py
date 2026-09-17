@@ -1,5 +1,11 @@
 import time
 import threading
+import os
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(APP_DIR)
+DATA_REFRESH_INTERVAL = 0.5
+
 import streamlit as st
 import pandas as pd
 from streamlit.runtime.scriptrunner import add_script_run_ctx
@@ -15,8 +21,9 @@ from views.watchlist_display import build_watchlist_display_frame, style_watchli
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
-with open("styles.css", "r", encoding="utf-8") as f:
-    st.markdown(f"", unsafe_allow_html=True)
+styles_path = os.path.join(APP_DIR, "styles.css")
+with open(styles_path, "r", encoding="utf-8") as f:
+    st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 # Start background updater singleton with active context
 @st.cache_resource
@@ -29,7 +36,7 @@ def start_background_engine():
                 current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
             except Exception as e:
                 print(f"Engine fault: {e}")
-            time.sleep(1.5)
+            time.sleep(DATA_REFRESH_INTERVAL)
     
     t = threading.Thread(target=run_backend, daemon=True)
     add_script_run_ctx(t)
@@ -44,7 +51,7 @@ render_sidebar()
 
 # Main Title & View Toggle
 st.title("📊 Live Portfolio & Market Watchlist")
-st.caption("Live feed via Angel One SmartAPI • Streaming updates every 2s")
+st.caption("Live feed via Angel One SmartAPI • Streaming updates every 0.5s")
 
 view_mode = st.pills(
     "Select Table View",
@@ -83,7 +90,7 @@ render_mock_portfolio_editor()
 st.divider()
 
 # Live Table & Metric Stream Fragment
-@st.fragment(run_every="2s")
+@st.fragment(run_every=DATA_REFRESH_INTERVAL)
 def live_dashboard():
     df = get_clean_data()
     if df.empty or 'Type' not in df.columns:

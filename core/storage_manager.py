@@ -2,9 +2,10 @@ import os
 import pandas as pd
 from core.formula_engine import get_visible_columns, set_column_visibility
 
-CSV_FILE = "portfolio.csv"
-WATCHLIST_FILE = "watchlist.txt"
-MOCK_PORTFOLIO_FILE = "mock_portfolio.csv"
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV_FILE = os.path.join(APP_DIR, "portfolio.csv")
+WATCHLIST_FILE = os.path.join(APP_DIR, "watchlist.txt")
+MOCK_PORTFOLIO_FILE = os.path.join(APP_DIR, "mock_portfolio.csv")
 
 _CACHED_MOCK_PORTFOLIO = None
 _LAST_MOCK_MTIME = 0
