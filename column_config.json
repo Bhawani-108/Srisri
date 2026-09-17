@@ -10,7 +10,7 @@
     {"name": "Profit", "type": "formula", "formula": "T_CMP_V - T_Buy_Price", "visible": true},
     {"name": "% Profit", "type": "formula", "formula": "IF(T_Buy_Price == 0, 0, (Profit / T_Buy_Price) * 100)", "visible": true},
     {"name": "SAlert", "type": "numeric", "visible": true},
-    {"name": "D%", "type": "formula", "formula": "IF(PC == 0, 0, ((CMP - PC) / PC) * 100)", "visible": true},
+    {"name": "D%", "type": "numeric", "visible": true},
     {"name": "DH%", "type": "numeric", "visible": true},
     {"name": "M %", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((CMP - PMC) / PMC) * 100)", "visible": true},
     {"name": "Buy Date", "type": "data", "visible": true},
