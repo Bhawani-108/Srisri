@@ -13,3 +13,7 @@ __pycache__/
 # Dynamic runtime files
 tmp*.csv
 portfolio.csv
+mock_portfolio.csv
+
+# Personal trading data
+watchlist.txt
