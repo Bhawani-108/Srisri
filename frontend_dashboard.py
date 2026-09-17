@@ -5,6 +5,7 @@ import os
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(APP_DIR)
 DATA_REFRESH_INTERVAL = 0.5
+UI_REFRESH_INTERVAL = 1.5
 
 import streamlit as st
 import pandas as pd
@@ -90,7 +91,7 @@ render_mock_portfolio_editor()
 st.divider()
 
 # Live Table & Metric Stream Fragment
-@st.fragment(run_every=DATA_REFRESH_INTERVAL)
+@st.fragment(run_every=UI_REFRESH_INTERVAL)
 def live_dashboard():
     df = get_clean_data()
     if df.empty or 'Type' not in df.columns:
