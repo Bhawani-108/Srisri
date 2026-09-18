@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from core.formula_engine import evaluate_formulas, get_configured_column_order
 
-# Exported for frontend_dashboard and backward compatibility
 ORDERED_COLUMNS = get_configured_column_order()
 
 def _safe_numeric(value, index=None):
@@ -36,8 +35,10 @@ def build_demat_display_frame(df):
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
-    # In views/demat_display.py -> build_demat_display_frame()
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
+
+    # Use incoming broker column or default to Angel One
+    broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
 
     base_frame = pd.DataFrame({
         "Index": range(1, len(rows) + 1),
@@ -59,13 +60,12 @@ def build_demat_display_frame(df):
         "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
         "PD Volume": pd_vol,
-        "Broker": pd.Series(["Angel One"] * len(rows), index=rows.index),
+        "Broker": broker_series,
     })
 
     output = evaluate_formulas(base_frame)
 
-    # Convert non-metadata columns to numeric; leave string/date/index columns alone
-    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume"}
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume", "Broker"}
     for col in output.columns:
         if col not in non_numeric:
             output[col] = pd.to_numeric(output[col], errors="coerce")

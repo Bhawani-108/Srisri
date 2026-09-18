@@ -1,17 +1,12 @@
 import time
 import threading
 import os
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-os.chdir(APP_DIR)
-DATA_REFRESH_INTERVAL = 0.5
-UI_REFRESH_INTERVAL = 1.5
-
 import streamlit as st
 import pandas as pd
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 import backend_updater
+from brokers.config import get_active_broker_name, get_supported_brokers
 from core.formula_engine import get_configured_column_order
 from core.storage_manager import load_column_prefs, save_column_prefs
 from core.portfolio_service import ensure_backend_data_loaded, get_clean_data
@@ -22,11 +17,11 @@ from views.watchlist_display import build_watchlist_display_frame, style_watchli
 
 st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
 
-styles_path = os.path.join(APP_DIR, "styles.css")
-with open(styles_path, "r", encoding="utf-8") as f:
-    st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+if os.path.exists("styles.css"):
+    with open("styles.css", "r", encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
-# Start background updater singleton with active context
+# Start background updater singleton
 @st.cache_resource
 def start_background_engine():
     def run_backend():
@@ -35,14 +30,37 @@ def start_background_engine():
             try:
                 current_portfolio = backend_updater.sync_portfolio_registry(current_portfolio)
                 current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
-            except Exception as e:
-                print(f"Engine fault: {e}")
-            time.sleep(DATA_REFRESH_INTERVAL)
+            except Exception:
+                pass
+            time.sleep(1.0)
     
     t = threading.Thread(target=run_backend, daemon=True)
     add_script_run_ctx(t)
     t.start()
     return t
+
+# Broker Switcher State Management
+if "active_broker" not in st.session_state:
+    st.session_state.active_broker = get_active_broker_name()
+
+broker_options = get_supported_brokers()
+selected_broker = st.selectbox(
+    "Select Active Broker Integration",
+    options=broker_options,
+    index=broker_options.index(st.session_state.active_broker) if st.session_state.active_broker in broker_options else 0,
+    key="active_broker_select",
+)
+
+if selected_broker != st.session_state.active_broker:
+    st.session_state.active_broker = selected_broker
+    os.environ["ACTIVE_BROKER"] = selected_broker
+    backend_updater.LAST_WATCHLIST_MTIME = 0
+    backend_updater.LAST_SYNCED_BROKER = None
+    with st.spinner(f"Switching feed to {selected_broker}..."):
+        fresh_df = backend_updater.sync_portfolio_registry(None)
+        if fresh_df is not None and not fresh_df.empty:
+            backend_updater.stream_tick_cycle(fresh_df)
+    st.rerun()
 
 start_background_engine()
 ensure_backend_data_loaded()
@@ -50,9 +68,10 @@ ensure_backend_data_loaded()
 # Sidebar
 render_sidebar()
 
-# Main Title & View Toggle
+# Main Header
 st.title("📊 Live Portfolio & Market Watchlist")
-st.caption("Live feed via Angel One SmartAPI • Streaming updates every 0.5s")
+broker_label = "Angel One SmartAPI" if selected_broker == "angel_one" else ("IndMoney API" if selected_broker == "indmoney" else "US Stocks")
+st.caption(f"Live feed via {broker_label} • Streaming updates every 2s")
 
 view_mode = st.pills(
     "Select Table View",
@@ -63,14 +82,14 @@ view_mode = st.pills(
 )
 st.divider()
 
-# Centralized Column Visibility Manager
+# Column Visibility Manager
 def update_centralized_prefs():
     ordered_cols = get_configured_column_order()
     new_visible = [col for col in ordered_cols if st.session_state.get(f"cent_col_chk_{col}", True)]
     save_column_prefs(new_visible)
 
 with st.expander("👁️ Column Visibility Manager", expanded=False):
-    st.caption("Toggle columns on or off. Preferences apply globally to both Demat and Watchlist views:")
+    st.caption("Toggle columns on or off:")
     configured_order = get_configured_column_order()
     current_visible_cols = set(load_column_prefs())
     cols_grid = st.columns(4)
@@ -85,18 +104,22 @@ with st.expander("👁️ Column Visibility Manager", expanded=False):
 
 st.divider()
 
-# Single unified positions & paper trading editor (covers buy dates, paper trades, prices)
 render_mock_portfolio_editor()
 
 st.divider()
 
 # Live Table & Metric Stream Fragment
-@st.fragment(run_every=UI_REFRESH_INTERVAL)
+@st.fragment(run_every="2s")
 def live_dashboard():
     df = get_clean_data()
     if df.empty or 'Type' not in df.columns:
         st.info("Syncing backend data stream...")
         return
+
+    # Filter rows matching active selected broker
+    active_broker_name = st.session_state.active_broker.lower()
+    if "Broker" in df.columns:
+        df = df[df["Broker"].str.lower() == active_broker_name].copy()
 
     holdings_df = df[df['Type'] == 'Holding'].copy().sort_values(by="Stock Name")
     watchlist_df = df[df['Type'] == 'Watchlist'].copy().sort_values(by="Stock Name")
@@ -146,7 +169,7 @@ def live_dashboard():
             active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]
             st.dataframe(style_demat_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True)
         else:
-            st.info("No delivery holdings currently in your Angel One account.")
+            st.info(f"No delivery holdings currently found for {broker_label}.")
     else:
         if not watchlist_df.empty:
             disp = build_watchlist_display_frame(watchlist_df)

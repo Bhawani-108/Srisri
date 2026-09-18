@@ -1,0 +1,57 @@
+import os
+import threading
+import pandas as pd
+from typing import Dict, Any, Optional
+
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+class BrokerStateManager:
+    """Thread-safe unified state manager handling multiple brokers independently."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._broker_data: Dict[str, pd.DataFrame] = {}
+        self._last_mtime: Dict[str, int] = {}
+
+    def get_portfolio_path(self, broker_name: str) -> str:
+        safe_name = str(broker_name).lower().strip()
+        return os.path.join(APP_DIR, f"portfolio_{safe_name}.csv")
+
+    def get_data(self, broker_name: str) -> pd.DataFrame:
+        safe_name = str(broker_name).lower().strip()
+        with self._lock:
+            if safe_name in self._broker_data:
+                return self._broker_data[safe_name].copy()
+
+        csv_path = self.get_portfolio_path(safe_name)
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            try:
+                df = pd.read_csv(csv_path)
+                with self._lock:
+                    self._broker_data[safe_name] = df
+                return df
+            except Exception:
+                pass
+        return pd.DataFrame()
+
+    def set_data(self, broker_name: str, df: pd.DataFrame):
+        if df is None or df.empty:
+            return
+        safe_name = str(broker_name).lower().strip()
+        with self._lock:
+            self._broker_data[safe_name] = df.copy()
+
+        csv_path = self.get_portfolio_path(safe_name)
+        try:
+            df.to_csv(csv_path, index=False)
+        except Exception:
+            pass
+
+    def clear(self, broker_name: Optional[str] = None):
+        with self._lock:
+            if broker_name:
+                self._broker_data.pop(str(broker_name).lower().strip(), None)
+            else:
+                self._broker_data.clear()
+
+state_manager = BrokerStateManager()

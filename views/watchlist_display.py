@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from core.formula_engine import evaluate_formulas, get_configured_column_order
 
-# Exported for frontend_dashboard and backward compatibility
 ORDERED_COLUMNS = get_configured_column_order()
 
 def _safe_numeric(value, index=None):
@@ -35,8 +34,10 @@ def build_watchlist_display_frame(df):
     d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
-    # In views/watchlist_display.py -> build_watchlist_display_frame()
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
+
+    # Use incoming broker column or default to Angel One
+    broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
 
     base_frame = pd.DataFrame({
         "Index": range(1, len(rows) + 1),
@@ -58,7 +59,7 @@ def build_watchlist_display_frame(df):
         "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
         "PD Volume": pd_vol,
-        "Broker": pd.Series(["Angel One"] * len(rows), index=rows.index),
+        "Broker": broker_series,
     })
 
     # Override CMP with Sell Price for closed mock positions
@@ -71,7 +72,6 @@ def build_watchlist_display_frame(df):
 
     output = evaluate_formulas(base_frame)
 
-    # Invert profits on paper SHORT trades
     if "Profit" in output.columns:
         for idx in rows.index:
             if side.loc[idx] == "SHORT" and pd.notna(output.loc[idx, "Profit"]):
@@ -79,7 +79,7 @@ def build_watchlist_display_frame(df):
                 if "% Profit" in output.columns and pd.notna(output.loc[idx, "% Profit"]):
                     output.loc[idx, "% Profit"] = -output.loc[idx, "% Profit"]
 
-    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume"}
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume", "Broker"}
     for col in output.columns:
         if col not in non_numeric:
             output[col] = pd.to_numeric(output[col], errors="coerce")

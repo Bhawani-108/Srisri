@@ -1,0 +1,2579 @@
+﻿==================================================
+FILE: \backend_updater.py
+==================================================
+import time
+import threading
+import requests
+import numpy as np
+import pandas as pd
+import os
+import tempfile
+from datetime import datetime
+import streamlit as st
+
+from brokers.config import get_active_broker_name, get_broker_secrets
+from brokers.manager import get_active_broker_adapter
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(APP_DIR, "portfolio.csv")
+WATCHLIST_FILE = os.path.join(APP_DIR, "watchlist.txt")
+SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
+DATA_REFRESH_INTERVAL = 1.0
+
+if not os.path.exists(WATCHLIST_FILE):
+    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        f.write("")
+
+if not os.path.exists(CSV_FILE):
+    with open(CSV_FILE, "w", encoding="utf-8") as f:
+        f.write("")
+
+try:
+    import pyotp
+except Exception:
+    pyotp = None
+
+try:
+    from SmartApi import SmartConnect
+except Exception:
+    SmartConnect = None
+
+try:
+    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+except Exception:
+    SmartWebSocketV2 = None
+
+# ==========================================
+# ANGEL ONE AUTHENTICATION
+# ==========================================
+smart_connect = None
+JWT_TOKEN = None
+FEED_TOKEN = None
+AUTH_LOCK = threading.Lock()
+
+def authenticate():
+    global smart_connect, JWT_TOKEN, FEED_TOKEN
+    if SmartConnect is None or pyotp is None:
+        print("âŒ [ANGEL ONE] SmartConnect or pyotp module not installed.")
+        return None, None
+
+    cfg = get_broker_secrets("angel_one")
+    api_key = cfg.get("api_key") or os.getenv("ANGEL_API_KEY", "")
+    client_id = cfg.get("client_id") or os.getenv("ANGEL_CLIENT_ID", "")
+    password = str(cfg.get("password") or os.getenv("ANGEL_PASSWORD", ""))
+    totp_secret = cfg.get("totp_secret") or os.getenv("ANGEL_TOTP_SECRET", "")
+
+    if not api_key or not client_id or not password or not totp_secret:
+        print(f"âŒ [ANGEL ONE] Incomplete credentials in secrets.toml! api_key={bool(api_key)}, client_id={bool(client_id)}, password={bool(password)}, totp={bool(totp_secret)}")
+        return None, None
+
+    with AUTH_LOCK:
+        try:
+            print(f"ðŸ“¡ [ANGEL ONE] Logging in client {client_id}...")
+            smart_connect = SmartConnect(api_key=api_key)
+            totp = pyotp.TOTP(totp_secret).now()
+            session = smart_connect.generateSession(client_id, password, totp)
+            if not session or not session.get('status'):
+                print(f"âŒ [ANGEL ONE] Session generation failed: {session.get('message') if session else 'None'}")
+                return None, None
+            FEED_TOKEN = smart_connect.feed_token or session.get('data', {}).get('feedToken')
+            JWT_TOKEN = session.get('data', {}).get('jwtToken')
+            print("ðŸŸ¢ Successfully authenticated with Angel One SmartAPI!")
+            return JWT_TOKEN, FEED_TOKEN
+        except Exception as e:
+            print(f"âŒ [ANGEL ONE] Auth exception: {e}")
+            return None, None
+
+def refresh_broker_session():
+    global JWT_TOKEN, FEED_TOKEN
+    new_jwt, new_feed = authenticate()
+    if new_jwt and new_feed:
+        JWT_TOKEN = new_jwt
+        FEED_TOKEN = new_feed
+        return True
+    return False
+
+# ==========================================
+# SCRIP MASTER
+# ==========================================
+TOKEN_MAP = {}
+EXCHANGE_MAP = {}
+SEGMENT_MAP = {}
+BASE_NAME_MAP = {}
+LAST_WATCHLIST_MTIME = 0
+SCRIP_LOADED = False
+
+def infer_symbol_segment(symbol: str, exchange: str | None = None) -> str:
+    text = str(symbol or "").upper().strip()
+    if not text: return "EQ"
+    suffix = text.rsplit('-', 1)[-1] if '-' in text else text
+    suffix = suffix.upper()
+    if "ETF" in text or "BEES" in text: return "ETF"
+    if "MF" in text or "MUTF" in text or "MFS" in text: return "MF"
+    if suffix in {"EQ", "BE", "BZ", "SM"}: return "EQ"
+    if any(tag in suffix for tag in ("FUT", "OPT", "CE", "PE")): return "F&O"
+    if any(tag in suffix for tag in ("COM", "CMD", "GOLD", "SILVER", "CRUDE")): return "COM"
+    if any(tag in suffix for tag in ("CUR", "USD", "INR")): return "CUR"
+    if exchange and str(exchange).upper() in {"NFO"}: return "F&O"
+    if exchange and str(exchange).upper() in {"MCX"}: return "COM"
+    return "EQ"
+
+def ensure_scrip_master():
+    global TOKEN_MAP, EXCHANGE_MAP, SEGMENT_MAP, BASE_NAME_MAP, SCRIP_LOADED
+    if SCRIP_LOADED and TOKEN_MAP:
+        return
+    try:
+        print("Downloading active Scrip Master from Angel One...")
+        res = requests.get(SCRIP_MASTER_URL, timeout=25)
+        res.raise_for_status()
+        scrip_data = res.json()
+        token_map, exchange_map, segment_map, base_name_map = {}, {}, {}, {}
+
+        for item in scrip_data:
+            exch = str(item.get('exch_seg', '')).upper()
+            if exch not in {'NSE', 'BSE', 'NFO', 'MCX', 'CDS', 'BFO', 'NCO'}:
+                continue
+            sym = str(item.get('symbol', '')).strip()
+            if not sym: continue
+            clean_sym = sym.split('-')[0].upper()
+            token = str(item.get('token', '')).strip()
+            native_name = str(item.get('name', '')).strip()
+            if not token: continue
+
+            unique_key = f"{clean_sym}:{exch}"
+            if unique_key not in token_map:
+                token_map[unique_key] = token
+                exchange_map[unique_key] = exch
+                segment_map[unique_key] = infer_symbol_segment(sym, exch)
+                base_name_map[unique_key] = native_name
+
+        TOKEN_MAP = token_map
+        EXCHANGE_MAP = exchange_map
+        SEGMENT_MAP = segment_map
+        BASE_NAME_MAP = base_name_map
+        SCRIP_LOADED = True
+        print(f"Scrip Master indexed: {len(token_map)} active instruments.")
+    except Exception as e:
+        print(f"Failed to fetch Scrip Master: {e}")
+
+# ==========================================
+# WEBSOCKET ENGINE
+# ==========================================
+LIVE_TICKS = {}
+WS_APP = None
+SUBSCRIBED_TOKENS = set()
+IS_WS_READY = False
+PENDING_EXCHANGE_GROUPS = {}
+
+def map_exch_to_ws_type(exch):
+    mapping = {"NSE": 1, "NFO": 2, "BSE": 3, "MCX": 4, "NCDEX": 5, "CDS": 7}
+    return mapping.get(str(exch).upper(), 1)
+
+def on_data(wsapp, msg):
+    try:
+        if isinstance(msg, dict) and 'token' in msg:
+            token = str(msg['token'])
+            ltp = float(msg.get('last_traded_price', 0)) / 100.0
+            close = float(msg.get('close_price', 0)) / 100.0
+            high = float(msg.get('high_price_of_the_day', 0)) / 100.0
+            vol = int(msg.get('volume_trade_for_the_day', 0))
+
+            if ltp > 0:
+                prev_record = LIVE_TICKS.get(token, {})
+                prev_pc = prev_record.get('PC', 0.0)
+                final_pc = close if close > 0 else (prev_pc if prev_pc > 0 else ltp)
+                LIVE_TICKS[token] = {
+                    'CMP': ltp,
+                    'PC': final_pc,
+                    'Day High': high if high > 0 else ltp,
+                    'Volume': vol if vol > 0 else prev_record.get('Volume', 0)
+                }
+    except Exception:
+        pass
+
+def on_open(wsapp):
+    global IS_WS_READY, SUBSCRIBED_TOKENS
+    IS_WS_READY = True
+    print("ðŸŸ¢ Angel One WebSocket Connection Established.")
+    if PENDING_EXCHANGE_GROUPS:
+        try:
+            token_list = [{"exchangeType": k, "tokens": v} for k, v in PENDING_EXCHANGE_GROUPS.items()]
+            wsapp.subscribe("ws_feed", 3, token_list)
+            SUBSCRIBED_TOKENS = set([tok for grp in PENDING_EXCHANGE_GROUPS.values() for tok in grp])
+            print(f"ðŸ“¡ Subscribed to {len(SUBSCRIBED_TOKENS)} tokens on WebSocket.")
+        except Exception:
+            pass
+
+def on_error(wsapp, error):
+    global IS_WS_READY
+    IS_WS_READY = False
+
+def on_close(wsapp):
+    global IS_WS_READY
+    IS_WS_READY = False
+
+def run_websocket():
+    global WS_APP, IS_WS_READY, SUBSCRIBED_TOKENS
+    retry_delay = 5
+
+    while True:
+        try:
+            active_broker = os.environ.get("ACTIVE_BROKER", "angel_one").lower()
+            if active_broker != "angel_one":
+                time.sleep(3)
+                continue
+
+            if not JWT_TOKEN or not FEED_TOKEN:
+                refresh_broker_session()
+                time.sleep(retry_delay)
+                continue
+
+            cfg = get_broker_secrets("angel_one")
+            api_key = cfg.get("api_key") or os.getenv("ANGEL_API_KEY", "")
+            client_id = cfg.get("client_id") or os.getenv("ANGEL_CLIENT_ID", "")
+
+            IS_WS_READY = False
+            SUBSCRIBED_TOKENS.clear()
+
+            WS_APP = SmartWebSocketV2(JWT_TOKEN, api_key, client_id, FEED_TOKEN)
+            WS_APP.on_open = on_open
+            WS_APP.on_data = on_data
+            WS_APP.on_error = on_error
+            WS_APP.on_close = on_close
+
+            WS_APP.connect()
+            time.sleep(retry_delay)
+        except Exception:
+            IS_WS_READY = False
+            time.sleep(retry_delay)
+            if retry_delay >= 15:
+                refresh_broker_session()
+            retry_delay = min(retry_delay * 2, 60)
+
+def start_ws_daemon():
+    if not any(t.name == "angel_one_ws_thread" for t in threading.enumerate()):
+        t = threading.Thread(target=run_websocket, name="angel_one_ws_thread", daemon=True)
+        t.start()
+
+def sync_ws_subscriptions(df):
+    if os.environ.get("ACTIVE_BROKER", "angel_one").lower() != "angel_one":
+        return
+    global SUBSCRIBED_TOKENS, PENDING_EXCHANGE_GROUPS
+    if df is None or df.empty:
+        return
+
+    current_tokens = set()
+    exchange_groups = {}
+    for _, row in df.iterrows():
+        tok = str(row.get('Token', '')).strip()
+        exch = str(row.get('Exchange', 'NSE')).strip()
+        if tok and exch:
+            current_tokens.add(tok)
+            exch_code = map_exch_to_ws_type(exch)
+            if exch_code not in exchange_groups:
+                exchange_groups[exch_code] = []
+            if tok not in exchange_groups[exch_code]:
+                exchange_groups[exch_code].append(tok)
+
+    PENDING_EXCHANGE_GROUPS = exchange_groups
+    new_tokens = current_tokens - SUBSCRIBED_TOKENS
+
+    is_socket_live = (
+        IS_WS_READY and 
+        WS_APP is not None and 
+        hasattr(WS_APP, "wsapp") and 
+        WS_APP.wsapp is not None and 
+        getattr(WS_APP.wsapp, "sock", None) is not None and 
+        getattr(WS_APP.wsapp.sock, "connected", False)
+    )
+
+    if new_tokens and is_socket_live:
+        try:
+            token_list = [{"exchangeType": k, "tokens": v} for k, v in exchange_groups.items()]
+            WS_APP.subscribe("ws_feed", 3, token_list)
+            SUBSCRIBED_TOKENS.update(current_tokens)
+        except Exception:
+            pass
+
+# ==========================================
+# PORTFOLIO REGISTRY SYNC
+# ==========================================
+LAST_SYNCED_BROKER = None
+
+def sync_portfolio_registry(current_df):
+    global LAST_WATCHLIST_MTIME, LAST_SYNCED_BROKER, SUBSCRIBED_TOKENS
+    active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
+
+    # Detect broker switch
+    broker_switched = (active_broker != LAST_SYNCED_BROKER)
+    if broker_switched:
+        LAST_SYNCED_BROKER = active_broker
+        SUBSCRIBED_TOKENS.clear()  # Reset websocket cache
+        current_df = None          # Invalidate stale frame
+
+    # --- INDMONEY / US STOCKS PATH ---
+    if active_broker in ("indmoney", "us_stocks"):
+        try:
+            adapter = get_active_broker_adapter()
+            pos = adapter.fetch_positions()
+            wl = adapter.fetch_watchlist()
+            combined = pos + wl
+            if not combined:
+                return pd.DataFrame()
+            df = pd.DataFrame(combined)
+            tokens = [str(t) for t in df.get("Token", []).dropna() if str(t)]
+            if tokens:
+                quotes = adapter.fetch_quotes(tokens)
+                qmap = {str(q["Token"]).strip(): q for q in quotes if q.get("Token")}
+                for idx, row in df.iterrows():
+                    tok = str(row.get("Token", "")).strip()
+                    if tok in qmap:
+                        df.at[idx, "CMP"] = float(qmap[tok]["CMP"])
+                        df.at[idx, "PC"] = float(qmap[tok]["PC"]) if qmap[tok]["PC"] > 0 else df.at[idx, "Average Price"]
+                        df.at[idx, "Day High"] = float(qmap[tok]["Day High"]) if qmap[tok]["Day High"] > 0 else df.at[idx, "CMP"]
+                        df.at[idx, "Volume"] = float(qmap[tok]["Volume"])
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    # --- ANGEL ONE PATH ---
+    ensure_scrip_master()
+
+    mtime = 0
+    try:
+        mtime = os.stat(WATCHLIST_FILE).st_mtime_ns
+    except FileNotFoundError:
+        pass
+
+    needs_refresh = (
+        current_df is None or 
+        broker_switched or 
+        mtime != LAST_WATCHLIST_MTIME or 
+        (hasattr(current_df, 'empty') and current_df.empty)
+    )
+
+    if needs_refresh:
+        LAST_WATCHLIST_MTIME = mtime
+        combined = []
+        seen_holdings = set()
+
+        try:
+            if smart_connect is None:
+                authenticate()
+            h_res = smart_connect.holding() if smart_connect else {}
+            if h_res and not h_res.get('status'):
+                msg = str(h_res.get('message', '')).lower()
+                if 'token' in msg or 'session' in msg:
+                    refresh_broker_session()
+                    h_res = smart_connect.holding() if smart_connect else {}
+
+            if h_res and h_res.get('status') and h_res.get('data'):
+                for item in h_res['data']:
+                    sym = str(item.get('tradingsymbol', '')).split('-')[0].strip().upper()
+                    exch = str(item.get('exchange', 'NSE')).upper()
+                    unique_key = f"{sym}:{exch}"
+                    tok = str(item.get('symboltoken', '')).strip() or TOKEN_MAP.get(unique_key, "")
+                    avg_price = float(item.get('averageprice', 0.0))
+                    close_price = float(item.get('close', 0.0))
+                    ltp_price = float(item.get('ltp', 0.0))
+
+                    cmp_val = ltp_price if ltp_price > 0 else (close_price if close_price > 0 else avg_price)
+                    pc_val = close_price if close_price > 0 else avg_price
+
+                    if sym and tok:
+                        seen_holdings.add(unique_key)
+                        combined.append({
+                            'Stock Name': sym,
+                            'Exchange': exch,
+                            'Token': tok,
+                            'Type': 'Holding',
+                            'Quantity': float(item.get('quantity', 0)),
+                            'Average Price': avg_price,
+                            'CMP': cmp_val,
+                            'PC': pc_val,
+                            'Day High': cmp_val,
+                            'Volume': 0,
+                            'Buy Date': None,
+                            'Buy Price': avg_price,
+                            'Broker': 'angel_one'
+                        })
+                print(f"ðŸ” [ANGEL ONE] Loaded {len(combined)} active holdings.")
+        except Exception as e:
+            print(f"Angel One holdings fetch error: {e}")
+
+        seen_watchlist = set()
+        if os.path.exists(WATCHLIST_FILE):
+            with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                watch_tickers = [line.strip().upper() for line in f if line.strip()]
+
+            for entry in watch_tickers:
+                sym = entry.split(":")[0]
+                exch = entry.split(":")[1] if ":" in entry else "NSE"
+                unique_key = f"{sym}:{exch}"
+                token = TOKEN_MAP.get(unique_key)
+                if unique_key not in seen_watchlist and token:
+                    combined.append({
+                        'Stock Name': sym,
+                        'Exchange': exch,
+                        'Token': token,
+                        'Type': 'Watchlist',
+                        'Quantity': 0.0,
+                        'Average Price': 0.0,
+                        'CMP': 0.0,
+                        'PC': 0.0,
+                        'Day High': 0.0,
+                        'Volume': 0,
+                        'Broker': 'angel_one'
+                    })
+                    seen_watchlist.add(unique_key)
+
+        if combined:
+            start_ws_daemon()
+
+        return pd.DataFrame(combined)
+    return current_df
+
+def stream_tick_cycle(df):
+    if df is None or df.empty:
+        return df
+
+    active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
+
+    if active_broker in ("indmoney", "us_stocks"):
+        try:
+            adapter = get_active_broker_adapter()
+            tokens = [str(t) for t in df.get("Token", []).dropna() if str(t)]
+            if tokens:
+                quotes = adapter.fetch_quotes(tokens)
+                qmap = {str(q["Token"]).strip(): q for q in quotes if q.get("Token")}
+                for idx, row in df.iterrows():
+                    tok = str(row.get("Token", "")).strip()
+                    if tok in qmap:
+                        df.at[idx, "CMP"] = float(qmap[tok]["CMP"])
+                        df.at[idx, "PC"] = float(qmap[tok]["PC"]) if qmap[tok]["PC"] > 0 else df.at[idx, "Average Price"]
+                        df.at[idx, "Day High"] = float(qmap[tok]["Day High"]) if qmap[tok]["Day High"] > 0 else df.at[idx, "CMP"]
+                        df.at[idx, "Volume"] = float(qmap[tok]["Volume"])
+        except Exception:
+            pass
+    else:
+        sync_ws_subscriptions(df)
+        t_series = df['Token'].astype(str)
+        tick_cmp = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('CMP'))
+        df['CMP'] = tick_cmp.combine_first(df.get('CMP', pd.Series(0.0, index=df.index))).fillna(0.0)
+
+        tick_pc = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('PC'))
+        df['PC'] = tick_pc.combine_first(df.get('PC', pd.Series(0.0, index=df.index))).fillna(0.0)
+
+        tick_high = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Day High'))
+        df['Day High'] = tick_high.combine_first(df.get('Day High', pd.Series(0.0, index=df.index))).fillna(df['CMP'])
+
+        tick_vol = t_series.map(lambda t: LIVE_TICKS.get(t, {}).get('Volume'))
+        df['Volume'] = tick_vol.combine_first(df.get('Volume', pd.Series(0, index=df.index))).fillna(0)
+
+    # Core Vectorized Calculations
+    pc_series = pd.to_numeric(df['PC'], errors='coerce').fillna(0.0)
+    cmp_series = pd.to_numeric(df['CMP'], errors='coerce').fillna(0.0)
+    high_series = pd.to_numeric(df['Day High'], errors='coerce').fillna(cmp_series)
+    qty_series = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0.0)
+    avg_series = pd.to_numeric(df['Average Price'], errors='coerce').fillna(0.0)
+
+    df['CMP'] = cmp_series
+    df['PC'] = pc_series
+    df['Day High'] = high_series
+    df['Quantity'] = qty_series
+    df['Average Price'] = avg_series
+
+    df['D%'] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
+    df['DH%'] = np.where(pc_series > 0, ((high_series - pc_series) / pc_series) * 100, 0.0)
+    df['SAlert'] = np.where(cmp_series > 0, ((cmp_series - high_series) / cmp_series) * 100, 0.0)
+
+    df['Total Invested'] = qty_series * avg_series
+    df['Current Value'] = qty_series * cmp_series
+    df['Net P&L'] = df['Current Value'] - df['Total Invested']
+    invested_series = df['Total Invested']
+    df['ROI (%)'] = np.where(invested_series > 0, (df['Net P&L'] / invested_series) * 100, 0.0)
+
+    # Atomic CSV replace
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(dir=APP_DIR, suffix='.csv')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            df.to_csv(f, index=False)
+        for _ in range(5):
+            try:
+                os.replace(temp_path, CSV_FILE)
+                break
+            except PermissionError:
+                time.sleep(0.05)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+    return df
+
+
+==================================================
+FILE: \column_config.json
+==================================================
+{
+  "columns": [
+    {"name": "Index", "type": "index", "visible": true},
+    {"name": "Stock Name", "type": "data", "visible": true},
+    {"name": "NSE/BSE etc", "type": "data", "visible": true},
+    {"name": "EQ etc", "type": "data", "visible": true},
+    {"name": "CMP", "type": "numeric", "visible": true},
+    {"name": "PC", "type": "numeric", "visible": true},
+    {"name": "Quantity", "type": "numeric", "visible": true},
+    {"name": "Profit", "type": "formula", "formula": "T_CMP_V - T_Buy_Price", "visible": true},
+    {"name": "% Profit", "type": "formula", "formula": "IF(T_Buy_Price == 0, 0, (Profit / T_Buy_Price) * 100)", "visible": true},
+    {"name": "SAlert", "type": "numeric", "visible": true},
+    {"name": "D%", "type": "numeric", "visible": true},
+    {"name": "DH%", "type": "numeric", "visible": true},
+    {"name": "M %", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((CMP - PMC) / PMC) * 100)", "visible": true},
+    {"name": "Buy Date", "type": "data", "visible": true},
+    {"name": "Buy Price", "type": "numeric", "visible": true},
+    {"name": "Sell Date", "type": "data", "visible": true},
+    {"name": "Sell Price", "type": "numeric", "visible": true},
+    {"name": "T_Buy_Price", "type": "formula", "formula": "Quantity * Buy_Price", "visible": true},
+    {"name": "T_Sell_Price", "type": "formula", "formula": "Quantity * Sell_Price", "visible": true},
+    {"name": "T_CMP_V", "type": "formula", "formula": "Quantity * CMP", "visible": true},
+    {"name": "PMC", "type": "data", "visible": true},
+    {"name": "PD Volume", "type": "data", "visible": true},
+    {"name": "Volume", "type": "numeric", "visible": true},
+    {"name": "Vol%", "type": "formula", "formula": "IF(PD_Volume == 0, 0, (Volume - PD_Volume) / PD_Volume * 100)", "visible": true},
+    {"name": "FPP(%)", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((T_Sell_Price - T_CMP_V) / T_CMP_V) * 100)", "visible": true},
+    {"name": "Broker", "type": "data", "visible": true}
+  ]
+}
+
+
+==================================================
+FILE: \frontend_dashboard.py
+==================================================
+import time
+import threading
+import os
+import streamlit as st
+import pandas as pd
+from streamlit.runtime.scriptrunner import add_script_run_ctx
+
+import backend_updater
+from brokers.config import get_active_broker_name, get_supported_brokers
+from core.formula_engine import get_configured_column_order
+from core.storage_manager import load_column_prefs, save_column_prefs
+from core.portfolio_service import ensure_backend_data_loaded, get_clean_data
+from components.sidebar import render_sidebar
+from components.mock_editor import render_mock_portfolio_editor
+from views.demat_display import build_demat_display_frame, style_demat_table
+from views.watchlist_display import build_watchlist_display_frame, style_watchlist_table
+
+st.set_page_config(page_title="Live Portfolio & Watchlist", layout="wide")
+
+if os.path.exists("styles.css"):
+    with open("styles.css", "r", encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# Start background updater singleton
+@st.cache_resource
+def start_background_engine():
+    def run_backend():
+        current_portfolio = None
+        while True:
+            try:
+                current_portfolio = backend_updater.sync_portfolio_registry(current_portfolio)
+                current_portfolio = backend_updater.stream_tick_cycle(current_portfolio)
+            except Exception:
+                pass
+            time.sleep(1.0)
+    
+    t = threading.Thread(target=run_backend, daemon=True)
+    add_script_run_ctx(t)
+    t.start()
+    return t
+
+# Broker Switcher State Management
+if "active_broker" not in st.session_state:
+    st.session_state.active_broker = get_active_broker_name()
+
+broker_options = get_supported_brokers()
+selected_broker = st.selectbox(
+    "Select Active Broker Integration",
+    options=broker_options,
+    index=broker_options.index(st.session_state.active_broker) if st.session_state.active_broker in broker_options else 0,
+    key="active_broker_select",
+)
+
+if selected_broker != st.session_state.active_broker:
+    st.session_state.active_broker = selected_broker
+    os.environ["ACTIVE_BROKER"] = selected_broker
+    backend_updater.LAST_WATCHLIST_MTIME = 0
+    backend_updater.LAST_SYNCED_BROKER = None
+    with st.spinner(f"Switching feed to {selected_broker}..."):
+        fresh_df = backend_updater.sync_portfolio_registry(None)
+        if fresh_df is not None and not fresh_df.empty:
+            backend_updater.stream_tick_cycle(fresh_df)
+    st.rerun()
+
+start_background_engine()
+ensure_backend_data_loaded()
+
+# Sidebar
+render_sidebar()
+
+# Main Header
+st.title("ðŸ“Š Live Portfolio & Market Watchlist")
+broker_label = "Angel One SmartAPI" if selected_broker == "angel_one" else ("IndMoney API" if selected_broker == "indmoney" else "US Stocks")
+st.caption(f"Live feed via {broker_label} â€¢ Streaming updates every 2s")
+
+view_mode = st.pills(
+    "Select Table View",
+    options=["ðŸ’¼ Demat Holdings", "ðŸ‘€ Market Watchlist"],
+    default="ðŸ’¼ Demat Holdings",
+    key="view_mode_pills",
+    label_visibility="collapsed"
+)
+st.divider()
+
+# Column Visibility Manager
+def update_centralized_prefs():
+    ordered_cols = get_configured_column_order()
+    new_visible = [col for col in ordered_cols if st.session_state.get(f"cent_col_chk_{col}", True)]
+    save_column_prefs(new_visible)
+
+with st.expander("ðŸ‘ï¸ Column Visibility Manager", expanded=False):
+    st.caption("Toggle columns on or off:")
+    configured_order = get_configured_column_order()
+    current_visible_cols = set(load_column_prefs())
+    cols_grid = st.columns(4)
+    for idx, col in enumerate(configured_order):
+        with cols_grid[idx % 4]:
+            st.checkbox(
+                col, 
+                value=col in current_visible_cols, 
+                key=f"cent_col_chk_{col}",
+                on_change=update_centralized_prefs
+            )
+
+st.divider()
+
+render_mock_portfolio_editor()
+
+st.divider()
+
+# Live Table & Metric Stream Fragment
+@st.fragment(run_every="2s")
+def live_dashboard():
+    df = get_clean_data()
+    if df.empty or 'Type' not in df.columns:
+        st.info("Syncing backend data stream...")
+        return
+
+    # Filter rows matching active selected broker
+    active_broker_name = st.session_state.active_broker.lower()
+    if "Broker" in df.columns:
+        df = df[df["Broker"].str.lower() == active_broker_name].copy()
+
+    holdings_df = df[df['Type'] == 'Holding'].copy().sort_values(by="Stock Name")
+    watchlist_df = df[df['Type'] == 'Watchlist'].copy().sort_values(by="Stock Name")
+
+    active_df = holdings_df if view_mode == "ðŸ’¼ Demat Holdings" else watchlist_df
+
+    total_invested = active_df['Total Invested'].sum() if not active_df.empty and 'Total Invested' in active_df.columns else 0.0
+    current_value = active_df['Current Value'].sum() if not active_df.empty and 'Current Value' in active_df.columns else 0.0
+    total_pnl = active_df['Net P&L'].sum() if not active_df.empty and 'Net P&L' in active_df.columns else 0.0
+    portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0) * 100
+
+    day_change_pct = 0.0
+    day_pnl = 0.0
+    if not active_df.empty and 'CMP' in active_df.columns and 'PC' in active_df.columns and 'Quantity' in active_df.columns:
+        prev_close_val = (active_df['Quantity'] * active_df['PC']).sum()
+        curr_val_active = (active_df['Quantity'] * active_df['CMP']).sum()
+        day_pnl = curr_val_active - prev_close_val
+        if prev_close_val > 0:
+            day_change_pct = (day_pnl / prev_close_val) * 100
+        elif view_mode == "ðŸ‘€ Market Watchlist" and 'D%' in active_df.columns:
+            day_change_pct = pd.to_numeric(active_df['D%'], errors='coerce').dropna().mean() or 0.0
+
+    pnl_prefix = "-â‚¹" if total_pnl < 0 else "â‚¹"
+    pnl_display = f"{pnl_prefix}{abs(total_pnl):,.2f}"
+    pnl_delta = f"-â‚¹{abs(total_pnl):,.2f}" if total_pnl < 0 else f"+â‚¹{abs(total_pnl):,.2f}"
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Portfolio Value", f"â‚¹{current_value:,.2f}")
+    col2.metric("Total Invested", f"â‚¹{total_invested:,.2f}")
+    col3.metric("Net Profit / Loss", pnl_display, delta=pnl_delta)
+    col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
+
+    if view_mode == "ðŸ‘€ Market Watchlist" and total_invested == 0:
+        col5.metric("1D % Change (Avg)", f"{day_change_pct:+.2f}%", delta=f"{day_change_pct:+.2f}%")
+    else:
+        day_delta_str = f"-â‚¹{abs(day_pnl):,.2f}" if day_pnl < 0 else f"+â‚¹{abs(day_pnl):,.2f}"
+        col5.metric("1D % Change", f"{day_change_pct:+.2f}%", delta=day_delta_str)
+
+    st.divider()
+
+    visible_cols_set = set(load_column_prefs())
+    active_order = get_configured_column_order()
+
+    if view_mode == "ðŸ’¼ Demat Holdings":
+        if not holdings_df.empty:
+            disp = build_demat_display_frame(holdings_df)
+            active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]
+            st.dataframe(style_demat_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True)
+        else:
+            st.info(f"No delivery holdings currently found for {broker_label}.")
+    else:
+        if not watchlist_df.empty:
+            disp = build_watchlist_display_frame(watchlist_df)
+            active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]
+            st.dataframe(style_watchlist_table(disp[active_cols]), column_order=active_cols, width="stretch", hide_index=True, height=500)
+        else:
+            st.info("Watchlist is empty. Use the sidebar on the left to add tickers.")
+
+live_dashboard()
+
+
+==================================================
+FILE: \launcher.py
+==================================================
+import sys
+import os
+import streamlit.web.cli as stcli
+
+def main():
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(app_dir)
+    script_path = os.path.join(app_dir, "frontend_dashboard.py")
+    sys.argv = ["streamlit", "run", script_path, "--server.headless=false"]
+    sys.exit(stcli.main())
+
+if __name__ == "__main__":
+    main()
+
+
+==================================================
+FILE: \requirements.txt
+==================================================
+streamlit
+pandas
+requests
+pyotp
+logzero
+websocket-client
+smartapi-python
+
+
+==================================================
+FILE: \styles.css
+==================================================
+html, body, [data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, #020b16 0%, #07182b 100%);
+    color: #edf6ff;
+}
+
+.block-container {
+    padding-top: 0.8rem !important;
+    padding-bottom: 0.6rem !important;
+    max-width: 100% !important;
+}
+
+h1 {
+    font-size: 2rem !important;
+    margin-bottom: 0.15rem !important;
+}
+
+h2 {
+    font-size: 1.02rem !important;
+}
+
+h3 {
+    font-size: 0.96rem !important;
+}
+
+.stMetric {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+    text-align: center !important;
+    padding: 0.22rem 0.35rem 0.14rem 0.35rem !important;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.6);
+    min-height: 92px !important;
+}
+
+/* Fix long numbers truncating with ellipses in metric cards */
+.stMetric [data-testid="stMetricValue"] {
+    font-size: 0.85rem !important;
+    white-space: nowrap !important;
+    overflow: visible !important;
+}
+
+.stMetric [data-testid="stMetricLabel"] {
+    font-size: 0.72rem !important;
+    color: #dfe8f3 !important;
+    text-align: center !important;
+    width: 100% !important;
+}
+
+div[data-testid="metric-container"] {
+    display: flex !important;
+    align-items: stretch !important;
+    justify-content: center !important;
+    text-align: center !important;
+}
+
+.stTabs [role="tablist"] {
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: flex-start;
+    margin-bottom: 0.4rem;
+}
+
+.stTabs [role="tab"] {
+    font-size: 0.78rem !important;
+    padding: 0.38rem 0.72rem !important;
+    border-radius: 8px 8px 0 0;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+div[data-testid="stToggle"] {
+    margin-top: 0.1rem;
+    margin-bottom: 0.1rem;
+}
+
+div[data-testid="stToggle"] label {
+    font-size: 0.8rem !important;
+    font-weight: 600;
+}
+
+div[data-testid="stToggle"] [role="switch"] {
+    background: rgba(34, 197, 94, 0.2);
+}
+
+.stSidebar {
+    padding-top: 0.5rem !important;
+}
+
+.stSidebar .stSelectbox label,
+.stSidebar .stTextInput label,
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button,
+.stSidebar p {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stSelectbox div[data-baseweb="select"] {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button {
+    height: 2.3rem !important;
+    border-radius: 8px !important;
+}
+
+.stCaption {
+    font-size: 0.74rem !important;
+}
+
+.stSuccess, .stWarning, .stError, .stInfo {
+    font-size: 0.78rem !important;
+}
+
+section[data-testid="stSidebar"] {
+    background: rgba(2, 11, 22, 0.82);
+}
+
+button[kind="secondary"] {
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 999px !important;
+    min-height: 32px !important;
+    padding: 0.2rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    color: #dfe8f3 !important;
+}
+
+button[kind="secondary"]:hover {
+    border-color: rgba(96, 165, 250, 0.7);
+}
+
+button[kind="primary"] {
+    background: linear-gradient(135deg, #1f9d55, #26c281) !important;
+    border: 1px solid rgba(34, 197, 94, 0.9) !important;
+    border-radius: 999px !important;
+    min-height: 32px !important;
+    padding: 0.2rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+    color: white !important;
+}
+
+div[data-testid="stHorizontalBlock"] {
+    gap: 0.35rem !important;
+    margin-bottom: 0.5rem !important;
+}
+
+div[data-testid="stPills"] {
+    gap: 0.35rem !important;
+    margin-bottom: 0.35rem !important;
+}
+
+div[data-testid="stPills"] button {
+    border-radius: 999px !important;
+    min-height: 30px !important;
+    padding: 0.25rem 0.7rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+}
+
+div[data-baseweb="base-input"] {
+    border-radius: 10px !important;
+    background: rgba(15, 23, 42, 0.8) !important;
+    border: 1px solid rgba(148, 163, 184, 0.22) !important;
+    box-shadow: none !important;
+}
+
+div[data-baseweb="base-input"] input {
+    font-size: 0.8rem !important;
+    color: #edf6ff !important;
+}
+
+div[data-testid="stFormSubmitButton"] button {
+    border-radius: 10px !important;
+    background: linear-gradient(135deg, #1f9d55, #26c281) !important;
+    border: 1px solid rgba(34, 197, 94, 0.9) !important;
+    font-weight: 700 !important;
+}
+
+section[data-testid="stSidebar"] div[data-testid="stBaseButton-secondary"] {
+    border-radius: 999px !important;
+}
+
+section[data-testid="stSidebar"] div[data-testid="stBaseButton-primary"] {
+    border-radius: 999px !important;
+}
+
+.stDataFrame {
+    font-size: 0.72rem !important;
+}
+
+.stDataFrame table {
+    font-size: 0.72rem !important;
+}
+
+.stTabs [role="tablist"] {
+    gap: 0.45rem;
+}
+
+.stTabs [role="tab"] {
+    font-size: 0.78rem !important;
+    padding: 0.38rem 0.72rem !important;
+    border-radius: 8px 8px 0 0;
+}
+
+div[data-testid="stToggle"] {
+    margin-top: 0.1rem;
+    margin-bottom: 0.1rem;
+}
+
+div[data-testid="stToggle"] label {
+    font-size: 0.8rem !important;
+    font-weight: 600;
+}
+
+div[data-testid="stToggle"] [role="switch"] {
+    background: rgba(34, 197, 94, 0.2);
+}
+
+.stSidebar {
+    padding-top: 0.5rem !important;
+}
+
+.stSidebar .stSelectbox label,
+.stSidebar .stTextInput label,
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button,
+.stSidebar p {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stSelectbox div[data-baseweb="select"] {
+    font-size: 0.8rem !important;
+}
+
+.stSidebar .stButton button,
+.stSidebar .stFormSubmitButton button {
+    height: 2.3rem !important;
+    border-radius: 8px !important;
+}
+
+.stCaption {
+    font-size: 0.74rem !important;
+}
+
+.stSuccess, .stWarning, .stError, .stInfo {
+    font-size: 0.78rem !important;
+}
+
+section[data-testid="stSidebar"] {
+    background: rgba(2, 11, 22, 0.82);
+}
+
+button[kind="secondary"] {
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+button[kind="secondary"]:hover {
+    border-color: rgba(96, 165, 250, 0.7);
+}
+
+
+
+==================================================
+FILE: \watchlist.txt
+==================================================
+
+
+==================================================
+FILE: \.devcontainer\devcontainer.json
+==================================================
+{
+  "name": "Python 3",
+  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "customizations": {
+    "codespaces": {
+      "openFiles": [
+        "README.md",
+        "frontend_dashboard.py"
+      ]
+    },
+    "vscode": {
+      "settings": {},
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  },
+  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo 'âœ… Packages installed and Requirements met'",
+  "postAttachCommand": {
+    "server": "streamlit run frontend_dashboard.py --server.enableCORS false --server.enableXsrfProtection false"
+  },
+  "portsAttributes": {
+    "8501": {
+      "label": "Application",
+      "onAutoForward": "openPreview"
+    }
+  },
+  "forwardPorts": [
+    8501
+  ]
+}
+
+
+==================================================
+FILE: \.streamlit\secrets.toml
+==================================================
+# ==========================================
+# ANGEL ONE SMARTAPI CREDENTIALS
+# ==========================================
+[angel_one]
+api_key = "tFHIr8gX"
+client_id = "B59649699"
+password = "2450"
+totp_secret = "LOIQBXVTKZ4AMYQTKDREOIOZX4"
+
+# ==========================================
+# INDMONEY / INDSTOCKS CREDENTIALS
+# ==========================================
+[indmoney]
+base_url = "https://api.indstocks.com"
+access_token = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRJRCI6IjdZSkRRIiwiZXhwIjoxNzg5NzgxNDAwLCJpYXQiOjE3ODk3MDQ4MjAsImlzcyI6ImluZG1vbmV5IiwicGFydG5lcklEIjoyMjU5MSwidG9rZW5JRCI6OTQwNzd9.UEnWXwJYhgGL7AKPuPHg-TRAG9NJJc_0M6H1W0qNEnwyllSH46m6MngpzL-Wg76ZtXKuTQHMsnuPXlVqSbKD0A"
+
+# ==========================================
+# BACKWARD COMPATIBILITY FLAT KEYS
+# ==========================================
+# Used as fallbacks if your environment accesses root-level secrets
+ANGEL_API_KEY = "tFHIr8gX"
+ANGEL_CLIENT_ID = "B59649699"
+ANGEL_PASSWORD = "2450"
+ANGEL_TOTP_SECRET = "LOIQBXVTKZ4AMYQTKDREOIOZX4"
+INDMONEY_ACCESS_TOKEN = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRJRCI6IjdZSkRRIiwiZXhwIjoxNzg5NzgxNDAwLCJpYXQiOjE3ODk3MDQ4MjAsImlzcyI6ImluZG1vbmV5IiwicGFydG5lcklEIjoyMjU5MSwidG9rZW5JRCI6OTQwNzd9.UEnWXwJYhgGL7AKPuPHg-TRAG9NJJc_0M6H1W0qNEnwyllSH46m6MngpzL-Wg76ZtXKuTQHMsnuPXlVqSbKD0A"
+
+
+==================================================
+FILE: \brokers\angel_one.py
+==================================================
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+from .base import BrokerAdapter
+
+class AngelOneAdapter(BrokerAdapter):
+    """Compatibility adapter for Angel One."""
+    name = "angel_one"
+
+    def __init__(self, backend_module=None, config=None):
+        self.backend = backend_module
+        self.config = config or {}
+
+    def login(self) -> bool:
+        return True
+
+    def fetch_positions(self) -> List[Dict[str, Any]]:
+        return []
+
+    def fetch_watchlist(self) -> List[Dict[str, Any]]:
+        return []
+
+    def fetch_quotes(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        return []
+
+
+==================================================
+FILE: \brokers\base.py
+==================================================
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional
+
+
+class BrokerAdapter(ABC):
+    """Common contract for broker integrations."""
+
+    name: str = "base"
+
+    @abstractmethod
+    def login(self) -> bool:
+        """Authenticate with the broker and return True if successful."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch_positions(self) -> List[Dict[str, Any]]:
+        """Return normalized holding rows for the dashboard."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch_watchlist(self) -> List[Dict[str, Any]]:
+        """Return normalized watchlist rows for the dashboard."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch_quotes(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Return normalized live quote rows with CMP, PC, Day High, and Volume."""
+        raise NotImplementedError
+
+    def normalize_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Enforce the internal schema used by the dashboard."""
+        normalized = {
+            "Stock Name": row.get("Stock Name") or row.get("Symbol") or row.get("Ticker") or "",
+            "Exchange": row.get("Exchange", "NSE").upper(),
+            "Token": str(row.get("Token", "")).strip(),
+            "Type": row.get("Type", "Holding"),
+            "Quantity": float(row.get("Quantity", 0) or 0),
+            "Average Price": float(row.get("Average Price", 0) or 0),
+            "CMP": float(row.get("CMP", 0) or 0),
+            "PC": float(row.get("PC", 0) or 0),
+            "Day High": float(row.get("Day High", row.get("CMP", 0) or 0)),
+            "Volume": float(row.get("Volume", 0) or 0),
+            "Buy Date": row.get("Buy Date"),
+            "Buy Price": row.get("Buy Price"),
+            "Sell Price": row.get("Sell Price"),
+            "Side": row.get("Side", "LONG"),
+            "Status": row.get("Status", "OPEN"),
+            "PD Volume": row.get("PD Volume", 0),
+            "Broker": self.name,
+        }
+        return normalized
+
+
+
+==================================================
+FILE: \brokers\config.py
+==================================================
+import os
+import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+DEFAULT_BROKER = "angel_one"
+SUPPORTED_BROKERS = ("angel_one", "indmoney", "us_stocks")
+
+def _load_raw_secrets():
+    # 1. Direct file load (guaranteed to work across every thread, worker, and script runner)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    toml_path = os.path.join(base_dir, ".streamlit", "secrets.toml")
+    
+    loaded = {}
+    try:
+        import tomllib
+        if os.path.exists(toml_path):
+            with open(toml_path, "rb") as f:
+                loaded = tomllib.load(f)
+    except Exception:
+        try:
+            import toml
+            if os.path.exists(toml_path):
+                with open(toml_path, "r", encoding="utf-8") as f:
+                    loaded = toml.load(f)
+        except Exception:
+            pass
+
+    if loaded:
+        return loaded
+
+    # 2. Fallback to st.secrets
+    try:
+        if hasattr(st, "secrets"):
+            return {k: v for k, v in st.secrets.items()}
+    except Exception:
+        pass
+
+    return {}
+
+def get_active_broker_name() -> str:
+    candidate = None
+    if get_script_run_ctx() is not None and hasattr(st, "session_state"):
+        candidate = st.session_state.get("active_broker")
+
+    if candidate is None:
+        candidate = os.getenv("ACTIVE_BROKER", DEFAULT_BROKER)
+
+    broker_name = str(candidate).strip().lower()
+    return broker_name if broker_name in SUPPORTED_BROKERS else DEFAULT_BROKER
+
+def get_supported_brokers():
+    return list(SUPPORTED_BROKERS)
+
+def get_broker_secrets(broker_name: str | None = None):
+    name = (broker_name or get_active_broker_name()).strip().lower()
+    secrets = _load_raw_secrets()
+
+    if name == "indmoney":
+        cfg = secrets.get("indmoney", {}) if isinstance(secrets.get("indmoney"), dict) else {}
+        token = cfg.get("access_token") or secrets.get("INDMONEY_ACCESS_TOKEN") or os.getenv("INDMONEY_ACCESS_TOKEN", "")
+        return {
+            "access_token": token,
+            "base_url": cfg.get("base_url", "https://api.indstocks.com")
+        }
+
+    if name == "angel_one":
+        cfg = secrets.get("angel_one", {}) if isinstance(secrets.get("angel_one"), dict) else {}
+        return {
+            "api_key": cfg.get("api_key") or secrets.get("ANGEL_API_KEY") or os.getenv("ANGEL_API_KEY", ""),
+            "client_id": cfg.get("client_id") or secrets.get("ANGEL_CLIENT_ID") or os.getenv("ANGEL_CLIENT_ID", ""),
+            "password": str(cfg.get("password") or secrets.get("ANGEL_PASSWORD") or os.getenv("ANGEL_PASSWORD", "")),
+            "totp_secret": cfg.get("totp_secret") or secrets.get("ANGEL_TOTP_SECRET") or os.getenv("ANGEL_TOTP_SECRET", ""),
+        }
+
+    return {}
+
+
+==================================================
+FILE: \brokers\indmoney.py
+==================================================
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List, Optional
+import requests
+import streamlit as st
+from .base import BrokerAdapter
+
+
+class IndMoneyAdapter(BrokerAdapter):
+    """Production adapter for INDmoney / INDstocks REST API."""
+
+    name = "indmoney"
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        self.base_url = "https://api.indstocks.com"
+        
+        token = ""
+        if hasattr(st, "secrets"):
+            token = st.secrets.get("INDMONEY_ACCESS_TOKEN", "")
+            if not token and "indmoney" in st.secrets:
+                token = st.secrets["indmoney"].get("access_token", "")
+        if not token:
+            token = self.config.get("access_token") or os.getenv("INDMONEY_ACCESS_TOKEN", "")
+            
+        self.access_token = str(token).strip()
+        self.timeout = 10.0
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.access_token:
+            headers["Authorization"] = self.access_token
+        return headers
+
+    def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None):
+        if not self.access_token:
+            return None
+        url = f"{self.base_url}{path}"
+        try:
+            resp = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=self._headers(),
+                params=params,
+                timeout=self.timeout
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except Exception:
+            return None
+
+    def _extract_items(self, payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [x for x in payload if isinstance(x, dict)]
+        if isinstance(payload, dict):
+            for k in ("data", "holdings", "positions", "result", "items"):
+                val = payload.get(k)
+                if isinstance(val, list):
+                    return [x for x in val if isinstance(x, dict)]
+            if "symbol" in payload or "security_id" in payload:
+                return [payload]
+        return []
+
+    def login(self) -> bool:
+        return bool(self.access_token)
+
+    def fetch_positions(self) -> List[Dict[str, Any]]:
+        """Queries settled Demat holdings + open CNC equity positions."""
+        records = []
+        seen_syms = set()
+
+        # 1. Demat Holdings
+        holdings_payload = self._request("GET", "/portfolio/holdings")
+        holding_items = self._extract_items(holdings_payload)
+
+        # 2. CNC Positions
+        positions_payload = self._request("GET", "/portfolio/positions", params={"segment": "equity", "product": "cnc"})
+        position_items = self._extract_items(positions_payload)
+
+        all_items = holding_items + position_items
+
+        for row in all_items:
+            sym = str(row.get("symbol") or row.get("trading_symbol") or "").split("-")[0].upper()
+            sec_id = str(row.get("security_id") or row.get("scrip_code") or row.get("token") or "").strip()
+            qty = float(row.get("total_qty") or row.get("net_qty") or row.get("quantity") or 0)
+            avg_p = float(row.get("avg_price") or row.get("average_price") or 0.0)
+
+            if sym and qty > 0 and sym not in seen_syms:
+                seen_syms.add(sym)
+                records.append(self.normalize_row({
+                    "Stock Name": sym,
+                    "Exchange": str(row.get("exchange", "NSE")).upper(),
+                    "Token": sec_id,
+                    "Type": "Holding",
+                    "Quantity": qty,
+                    "Average Price": avg_p,
+                    "Buy Price": avg_p,
+                    "CMP": avg_p,
+                    "PC": avg_p,
+                    "Day High": avg_p,
+                    "Volume": 0,
+                    "Broker": "indmoney"
+                }))
+        return records
+
+    def fetch_watchlist(self) -> List[Dict[str, Any]]:
+        watchlist_file = "watchlist.txt"
+        if not os.path.exists(watchlist_file):
+            return []
+
+        with open(watchlist_file, "r", encoding="utf-8") as f:
+            tickers = [line.strip().upper() for line in f if line.strip()]
+
+        records = []
+        for ticker in tickers:
+            sym = ticker.split(":")[0]
+            exch = ticker.split(":")[1] if ":" in ticker else "NSE"
+            records.append(self.normalize_row({
+                "Stock Name": sym,
+                "Exchange": exch,
+                "Token": "",
+                "Type": "Watchlist",
+                "Quantity": 0.0,
+                "Average Price": 0.0,
+                "CMP": 0.0,
+                "PC": 0.0,
+                "Day High": 0.0,
+                "Volume": 0,
+                "Broker": "indmoney"
+            }))
+        return records
+
+    def fetch_quotes(self, tokens_or_symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if not tokens_or_symbols:
+            return []
+
+        scrip_list = []
+        for item in tokens_or_symbols:
+            code = str(item).strip()
+            if not code:
+                continue
+            if "_" in code:
+                scrip_list.append(code)
+            else:
+                scrip_list.append(f"NSE_{code}")
+
+        payload = self._request("GET", "/market/quotes/full", params={"scrip-codes": ",".join(scrip_list[:50])})
+        if not payload or not isinstance(payload, dict):
+            return []
+
+        data_block = payload.get("data", {})
+        records = []
+
+        # INDstocks formats responses as: {"data": {"NSE_1594": {"live_price": ..., "prev_close": ...}}}
+        if isinstance(data_block, dict):
+            for scrip_key, val in data_block.items():
+                if not isinstance(val, dict):
+                    continue
+                raw_token = scrip_key.split("_")[-1]
+                records.append(self.normalize_row({
+                    "Stock Name": str(val.get("symbol", "")).upper(),
+                    "Exchange": "NSE",
+                    "Token": raw_token,
+                    "CMP": float(val.get("live_price") or val.get("ltp") or 0.0),
+                    "PC": float(val.get("prev_close") or val.get("close") or 0.0),
+                    "Day High": float(val.get("day_high") or val.get("high") or 0.0),
+                    "Volume": float(val.get("volume") or 0),
+                    "Broker": "indmoney"
+                }))
+        return records
+
+
+==================================================
+FILE: \brokers\manager.py
+==================================================
+from __future__ import annotations
+
+from .angel_one import AngelOneAdapter
+from .config import (
+    DEFAULT_BROKER,
+    get_active_broker_name,
+    get_broker_secrets,
+    get_supported_brokers as config_supported_brokers,
+)
+from .indmoney import IndMoneyAdapter
+
+# Optional import for US stocks adapter
+try:
+    from .us_stocks import USStocksAdapter
+except ImportError:
+    USStocksAdapter = None
+
+
+def get_active_broker_adapter(backend_module=None):
+    """
+    Factory function resolving the active broker adapter based on runtime config.
+    """
+    broker_name = get_active_broker_name()
+
+    if broker_name == "indmoney":
+        return IndMoneyAdapter(config=get_broker_secrets("indmoney"))
+
+    if broker_name == "us_stocks" and USStocksAdapter is not None:
+        return USStocksAdapter()
+
+    return AngelOneAdapter(backend_module=backend_module, config=get_broker_secrets("angel_one"))
+
+
+def get_supported_brokers():
+    return list(config_supported_brokers())
+
+
+__all__ = ["get_active_broker_adapter", "get_supported_brokers", "DEFAULT_BROKER"]
+
+
+==================================================
+FILE: \brokers\us_stocks.py
+==================================================
+from __future__ import annotations
+import os
+from typing import Any, Dict, List, Optional
+import pandas as pd
+from .base import BrokerAdapter
+
+class USStocksAdapter(BrokerAdapter):
+    """Adapter for tracking US Equity holdings with live US quote feeds."""
+    name = "us_stocks"
+
+    def login(self) -> bool:
+        return True
+
+    def fetch_positions(self) -> List[Dict[str, Any]]:
+        csv_file = "us_holdings.csv"
+        if not os.path.exists(csv_file):
+            # Create sample template
+            sample = pd.DataFrame([
+                {"Stock Name": "AAPL", "Quantity": 2, "Buy Price": 185.50, "Buy Date": "2024-01-15"},
+                {"Stock Name": "NVDA", "Quantity": 5, "Buy Price": 110.00, "Buy Date": "2024-03-10"},
+                {"Stock Name": "TSLA", "Quantity": 3, "Buy Price": 215.20, "Buy Date": "2024-02-20"}
+            ])
+            sample.to_csv(csv_file, index=False)
+
+        try:
+            df = pd.read_csv(csv_file)
+        except Exception:
+            return []
+
+        records = []
+        for _, row in df.iterrows():
+            sym = str(row.get("Stock Name", "")).strip().upper()
+            qty = float(row.get("Quantity", 0))
+            buy_p = float(row.get("Buy Price", 0.0))
+            if sym and qty > 0:
+                records.append(self.normalize_row({
+                    "Stock Name": sym,
+                    "Exchange": "NASDAQ",
+                    "Token": sym,
+                    "Type": "Holding",
+                    "Quantity": qty,
+                    "Average Price": buy_p,
+                    "Buy Price": buy_p,
+                    "CMP": buy_p,
+                    "PC": buy_p,
+                    "Day High": buy_p,
+                    "Volume": 0,
+                    "Broker": "us_stocks"
+                }))
+        return records
+
+    def fetch_watchlist(self) -> List[Dict[str, Any]]:
+        return []
+
+    def fetch_quotes(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if not symbols:
+            return []
+        try:
+            import yfinance as yf
+            tickers = yf.Tickers(" ".join(symbols))
+            results = []
+            for sym in symbols:
+                fast = getattr(tickers.tickers.get(sym), "fast_info", None)
+                if fast:
+                    cmp_ = float(fast.last_price or 0.0)
+                    pc_ = float(fast.previous_close or cmp_)
+                    high_ = float(fast.day_high or cmp_)
+                    vol_ = float(fast.last_volume or 0)
+                    results.append(self.normalize_row({
+                        "Stock Name": sym,
+                        "Exchange": "NASDAQ",
+                        "Token": sym,
+                        "CMP": cmp_,
+                        "PC": pc_,
+                        "Day High": high_,
+                        "Volume": vol_,
+                        "Broker": "us_stocks"
+                    }))
+            return results
+        except Exception:
+            return []
+
+
+==================================================
+FILE: \brokers\__init__.py
+==================================================
+from .base import BrokerAdapter
+from .angel_one import AngelOneAdapter
+from .indmoney import IndMoneyAdapter
+from .manager import get_active_broker_adapter, get_supported_brokers
+
+__all__ = [
+    "BrokerAdapter",
+    "AngelOneAdapter",
+    "IndMoneyAdapter",
+    "get_active_broker_adapter",
+    "get_supported_brokers",
+]
+
+
+
+==================================================
+FILE: \components\mock_editor.py
+==================================================
+import time
+import pandas as pd
+import streamlit as st
+import backend_updater
+from core.storage_manager import load_mock_portfolio, save_mock_portfolio, load_watchlist_tickers, save_watchlist_tickers, append_watchlist_tickers
+from core.portfolio_service import get_clean_data
+
+def render_mock_portfolio_editor():
+    with st.expander("ðŸ“ Edit Mock Portfolio (Paper Trading)", expanded=False):
+        st.subheader("ðŸ“¥ Import CSV")
+        uploaded_mock_file = st.file_uploader(
+            "Upload CSV to add or replace mock positions and watchlist",
+            type=["csv"],
+            key="mock_portfolio_csv_uploader"
+        )
+
+        if uploaded_mock_file is not None:
+            col_append, col_replace = st.columns(2)
+            with col_append:
+                do_append = st.button("âž• Append Stocks", width="stretch")
+            with col_replace:
+                do_replace = st.button("ðŸš€ Replace Entire Watchlist", width="stretch")
+
+            if do_append or do_replace:
+                try:
+                    import_df = pd.read_csv(uploaded_mock_file)
+                    import_df.columns = [str(c).strip() for c in import_df.columns]
+
+                    stock_col = next((c for c in ["Stock Name", "Symbol", "Ticker"] if c in import_df.columns), None)
+                    if not stock_col:
+                        stock_col = next((c for c in import_df.columns if "STOCK" in c.upper() or "NAME" in c.upper()), import_df.columns[0])
+
+                    import_df["Stock Name"] = import_df[stock_col].astype(str).str.strip().str.upper()
+                    import_df = import_df[import_df["Stock Name"].str.len() > 0]
+                    import_df = import_df[~import_df["Stock Name"].isin(["NAN", "NONE", "NULL", "", "NA"])]
+                    import_df = import_df.dropna(subset=["Stock Name"]).drop_duplicates(subset=["Stock Name"], keep="last")
+
+                    if import_df.empty:
+                        st.error("No valid stock entries found in the uploaded CSV.")
+                    else:
+                        exch_col = next((c for c in ["NSE/BSE etc", "Exchange", "Exch"] if c in import_df.columns), None)
+                        import_df["Exchange"] = import_df[exch_col].astype(str).str.strip().str.upper().replace({'NAN': 'NSE', 'NONE': 'NSE', '': 'NSE'}) if exch_col else "NSE"
+
+                        def safe_parse_side(val):
+                            if pd.isna(val): return None
+                            s = str(val).strip().upper()
+                            if s in ["", "NAN", "NONE", "NULL", "", "NA"]: return None
+                            return "SHORT" if "SHORT" in s else "LONG"
+
+                        def safe_parse_status(val):
+                            if pd.isna(val): return None
+                            s = str(val).strip().upper()
+                            if s in ["", "NAN", "NONE", "NULL", "", "NA"]: return None
+                            return "CLOSED" if "CLOSE" in s else "OPEN"
+
+                        import_df["Side"] = import_df["Side"].apply(safe_parse_side) if "Side" in import_df.columns else None
+                        import_df["Status"] = import_df["Status"].apply(safe_parse_status) if "Status" in import_df.columns else None
+                        import_df["Quantity"] = pd.to_numeric(import_df.get("Quantity", pd.NA), errors="coerce")
+                        import_df["Buy Price"] = pd.to_numeric(import_df.get("Buy Price", pd.NA), errors="coerce")
+                        import_df["Sell Price"] = pd.to_numeric(import_df.get("Sell Price", pd.NA), errors="coerce")
+                        import_df["PD Volume"] = pd.to_numeric(import_df.get("PD Volume", pd.NA), errors="coerce")
+
+                        if "Buy Date" in import_df.columns:
+                            parsed_date = pd.to_datetime(import_df["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                            import_df["Buy Date"] = parsed_date.where(parsed_date.notna(), None)
+                        else:
+                            import_df["Buy Date"] = None
+
+                        cols_to_keep = ["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date", "PD Volume"]
+                        prepared_import = import_df[cols_to_keep].copy()
+                        new_watchlist_entries = [f"{str(r['Stock Name']).strip()}:{str(r.get('Exchange', 'NSE')).strip()}" for _, r in import_df.iterrows()]
+
+                        if do_replace:
+                            save_mock_portfolio(prepared_import)
+                            save_watchlist_tickers(new_watchlist_entries)
+                            msg = f"Successfully replaced watchlist with {len(prepared_import)} stocks!"
+                        else:
+                            existing_mock = load_mock_portfolio()
+                            merged_mock = existing_mock[~existing_mock["Stock Name"].isin(prepared_import["Stock Name"])].copy()
+                            merged_mock = pd.concat([merged_mock, prepared_import], ignore_index=True)
+                            save_mock_portfolio(merged_mock)
+
+                            existing_wl = load_watchlist_tickers()
+                            existing_set = set(existing_wl)
+                            added_tickers = []
+                            for entry in new_watchlist_entries:
+                                sym = entry.split(":")[0]
+                                if entry not in existing_set and sym not in existing_set:
+                                    added_tickers.append(entry)
+                                    existing_set.add(entry)
+
+                            if added_tickers:
+                                append_watchlist_tickers(added_tickers)
+
+                            msg = f"Appended/updated {len(prepared_import)} stocks in mock portfolio!"
+
+                        backend_updater.LAST_WATCHLIST_MTIME = 0
+                        st.success(f"{msg} Syncing live feed...")
+                        time.sleep(1.0)
+                        st.rerun()
+
+                except Exception as ex:
+                    st.error(f"Failed to process CSV file: {ex}")
+
+        st.divider()
+
+        # MANUAL DATA EDITOR
+        init_df = get_clean_data()
+        init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
+        
+        if not init_watchlist.empty:
+            for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]:
+                if col not in init_watchlist.columns: 
+                    init_watchlist[col] = None
+                    
+            mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date", "PD Volume"]].copy()
+            
+            def clean_editor_col(val, pos_val, neg_val):
+                if pd.isna(val) or str(val).strip().upper() in ["", "NAN", "NONE", "NULL", "", "NA"]:
+                    return None
+                s = str(val).strip().upper()
+                return pos_val if pos_val in s else neg_val
+
+            mock_editor_df["Side"] = mock_editor_df["Side"].apply(lambda x: clean_editor_col(x, "SHORT", "LONG"))
+            mock_editor_df["Status"] = mock_editor_df["Status"].apply(lambda x: clean_editor_col(x, "CLOSED", "OPEN"))
+            mock_editor_df["Quantity"] = pd.to_numeric(mock_editor_df["Quantity"], errors="coerce")
+            mock_editor_df["Buy Price"] = pd.to_numeric(mock_editor_df["Buy Price"], errors="coerce")
+            mock_editor_df["Sell Price"] = pd.to_numeric(mock_editor_df["Sell Price"], errors="coerce")
+            mock_editor_df["PD Volume"] = pd.to_numeric(mock_editor_df["PD Volume"], errors="coerce")
+            
+            if "Buy Date" in mock_editor_df.columns:
+                mock_editor_df["Buy Date"] = mock_editor_df["Buy Date"].astype("string")
+
+            edited_mock = st.data_editor(
+                mock_editor_df, 
+                width="stretch", 
+                hide_index=True, 
+                disabled=["Stock Name"], 
+                column_config={
+                    "Side": st.column_config.SelectboxColumn("Side", options=["LONG", "SHORT"], required=False),
+                    "Status": st.column_config.SelectboxColumn("Status", options=["OPEN", "CLOSED"], required=False),
+                    "Quantity": st.column_config.NumberColumn("Quantity"),
+                    "Buy Price": st.column_config.NumberColumn("Buy Price"),
+                    "Sell Price": st.column_config.NumberColumn("Sell Price"),
+                    "Buy Date": st.column_config.TextColumn("Buy Date"),
+                    "PD Volume": st.column_config.NumberColumn("PD Volume"),
+                },
+                key="mock_editor"
+            )
+            
+            if not edited_mock.equals(mock_editor_df):
+                manual_rows = edited_mock.copy()
+                manual_rows["Stock Name"] = manual_rows["Stock Name"].astype(str).str.upper()
+                if "Buy Date" in manual_rows.columns: 
+                    manual_rows["Buy Date"] = pd.to_datetime(manual_rows["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                
+                save_mock_portfolio(manual_rows)
+                st.rerun()
+        else:
+            st.info("Watchlist is empty. Upload a CSV above or use the sidebar to add tickers.")
+
+
+==================================================
+FILE: \components\sidebar.py
+==================================================
+import time
+import streamlit as st
+import backend_updater
+from core.symbol_catalog import get_all_indexed_symbols
+from core.storage_manager import load_watchlist_tickers, save_watchlist_tickers
+
+def render_sidebar():
+    with st.sidebar:
+        st.header("âš¡ Manage Watchlist")
+
+        search_query = st.text_input(
+            "Search", placeholder="Search e.g. tata, reliance, nifty...",
+            key="global_search_input", label_visibility="collapsed"
+        ).strip().lower()
+
+        ui_category_map = {"All": "All", "Stock": "EQ", "F&O": "F&O", "ETF": "ETF", "Mutual Funds": "MF"}
+        selected_pill = st.pills("Filter by segment", options=list(ui_category_map.keys()), default="All", selection_mode="single", label_visibility="collapsed")
+        category_filter = ui_category_map.get(selected_pill, "All")
+
+        all_symbols = get_all_indexed_symbols()
+        
+        if search_query:
+            matched_items = [item for item in all_symbols if (category_filter == "All" or item["segment"] == category_filter) and (search_query in item["search_key"])][:60]
+        else:
+            matched_items = [item for item in all_symbols if (category_filter == "All" or item["segment"] == category_filter)][:60]
+
+        with st.form(key="add_ticker_form", clear_on_submit=True):
+            display_options = [item["label"] for item in matched_items]
+            selected_label = st.selectbox("Matching Instruments", options=display_options, index=0 if display_options else None, placeholder="Select instrument to add...", label_visibility="collapsed")
+            submit_add = st.form_submit_button("âž• Add Ticker", width="stretch")
+
+            if submit_add and selected_label:
+                selected_item = next((item for item in matched_items if item["label"] == selected_label), None)
+                if selected_item is None:
+                    st.warning("Please choose a valid symbol.")
+                else:
+                    new_ticker = str(selected_item["unique_key"]).strip().upper()
+                    existing = load_watchlist_tickers()
+
+                    if new_ticker in existing:
+                        st.warning(f"'{new_ticker}' is already on the watchlist.")
+                    else:
+                        existing.append(new_ticker)
+                        save_watchlist_tickers(existing)
+                        backend_updater.LAST_WATCHLIST_MTIME = 0
+                        st.success(f"Added '{new_ticker}'. Syncing live feed...")
+                        time.sleep(0.5)
+                        st.rerun()
+
+        st.divider()
+
+        active_watchlist = load_watchlist_tickers()
+        if active_watchlist:
+            st.subheader("Remove Ticker")
+            stock_to_remove = st.selectbox("Select ticker to remove", active_watchlist)
+            if st.button("ðŸ—‘ï¸ Delete from Watchlist", width="stretch"):
+                updated_list = [s for s in active_watchlist if s != stock_to_remove]
+                save_watchlist_tickers(updated_list)
+                backend_updater.LAST_WATCHLIST_MTIME = 0
+                st.success(f"Removed '{stock_to_remove}'")
+                time.sleep(0.5)
+                st.rerun()
+
+
+==================================================
+FILE: \components\__init__.py
+==================================================
+
+
+==================================================
+FILE: \core\formula_engine.py
+==================================================
+import os
+import re
+import json
+import numpy as np
+import pandas as pd
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(BASE_DIR, "column_config.json")
+
+# In-memory evaluation cache state
+_CACHED_CONFIG_MTIME = -1
+_CACHED_DEFINITIONS = []
+_CACHED_ORDERED_COLUMNS = []
+_CACHED_VISIBLE_COLUMNS = []
+_CACHED_EXECUTION_PLAN = []
+_CACHED_DISPLAY_ORDER = []
+_CACHED_RENAME_MAP = {}
+
+ENV = {
+    "IF": lambda cond, t, f: np.where(cond, t, f),
+    "MAX": np.maximum,
+    "MIN": np.minimum,
+    "ABS": np.abs,
+    "np": np
+}
+
+def _sanitize_col_name(name: str) -> str:
+    return re.sub(r'[\s\.\-\%/]', '_', str(name))
+
+def _get_formula_dependencies(expr: str, all_sanitized_targets: set) -> set:
+    tokens = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', expr))
+    return tokens.intersection(all_sanitized_targets)
+
+def _rebuild_cache():
+    global _CACHED_CONFIG_MTIME, _CACHED_DEFINITIONS, _CACHED_ORDERED_COLUMNS
+    global _CACHED_VISIBLE_COLUMNS, _CACHED_EXECUTION_PLAN, _CACHED_DISPLAY_ORDER, _CACHED_RENAME_MAP
+
+    if not os.path.exists(CONFIG_PATH):
+        _CACHED_DEFINITIONS = []
+        _CACHED_ORDERED_COLUMNS = []
+        _CACHED_VISIBLE_COLUMNS = []
+        _CACHED_EXECUTION_PLAN = []
+        _CACHED_DISPLAY_ORDER = []
+        _CACHED_RENAME_MAP = {}
+        return
+
+    try:
+        current_mtime = os.stat(CONFIG_PATH).st_mtime_ns
+    except OSError:
+        current_mtime = -1
+
+    if current_mtime == _CACHED_CONFIG_MTIME:
+        return
+
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        defs = data.get("columns", [])
+    except Exception as e:
+        print(f"Error reading {CONFIG_PATH}: {e}")
+        return
+
+    _CACHED_CONFIG_MTIME = current_mtime
+    _CACHED_DEFINITIONS = defs
+    _CACHED_ORDERED_COLUMNS = [c.get("name") for c in defs if isinstance(c, dict) and "name" in c]
+    _CACHED_VISIBLE_COLUMNS = [c.get("name") for c in defs if isinstance(c, dict) and c.get("visible", True)]
+
+    # Pre-compile topological execution plan
+    all_col_identifiers = {_sanitize_col_name(it.get("name")) for it in defs}
+    formula_items = [it for it in defs if it.get("type") == "formula" and it.get("formula")]
+
+    # Build dependency graph
+    graph = {}
+    item_map = {}
+    for item in formula_items:
+        s_name = _sanitize_col_name(item.get("name"))
+        item_map[s_name] = item
+        expr = str(item.get("formula", ""))
+        deps = _get_formula_dependencies(expr, all_col_identifiers) - {s_name}
+        graph[s_name] = deps
+
+    # Topological sort
+    sorted_names = []
+    visited = set()
+    visiting = set()
+
+    def visit(node):
+        if node in visiting: return
+        if node not in visited:
+            visiting.add(node)
+            for neighbor in graph.get(node, []):
+                if neighbor in item_map:
+                    visit(neighbor)
+            visiting.remove(node)
+            visited.add(node)
+            sorted_names.append(node)
+
+    for node in graph:
+        if node not in visited:
+            visit(node)
+
+    # Pre-compile expressions to native Python bytecode
+    plan = []
+    for s_name in sorted_names:
+        item = item_map[s_name]
+        raw_expr = str(item.get("formula", ""))
+
+        for raw_col in defs:
+            r_name = raw_col.get("name", "")
+            c_target = _sanitize_col_name(r_name)
+            if r_name != c_target and r_name in raw_expr:
+                raw_expr = raw_expr.replace(r_name, c_target)
+
+        is_if = False
+        compiled_parts = None
+        if raw_expr.startswith("IF(") and raw_expr.endswith(")"):
+            inner = raw_expr[3:-1]
+            parts = [p.strip() for p in inner.split(",")]
+            if len(parts) == 3:
+                is_if = True
+                compiled_parts = [
+                    compile(parts[0], '', 'eval'),
+                    compile(parts[1], '', 'eval'),
+                    compile(parts[2], '', 'eval')
+                ]
+
+        if not is_if:
+            compiled_code = compile(raw_expr, '', 'eval')
+        else:
+            compiled_code = None
+
+        plan.append({
+            "target": s_name,
+            "is_if": is_if,
+            "code": compiled_code,
+            "parts": compiled_parts
+        })
+
+    _CACHED_EXECUTION_PLAN = plan
+    _CACHED_RENAME_MAP = {_sanitize_col_name(item.get("name")): item.get("name") for item in defs}
+    _CACHED_DISPLAY_ORDER = [item.get("name") for item in defs]
+
+def load_column_definitions():
+    _rebuild_cache()
+    return _CACHED_DEFINITIONS
+
+def save_column_definitions(columns):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"columns": columns}, f, indent=2)
+        _rebuild_cache()
+    except Exception as e:
+        print(f"Error saving {CONFIG_PATH}: {e}")
+
+def get_configured_column_order():
+    _rebuild_cache()
+    return _CACHED_ORDERED_COLUMNS
+
+def get_visible_columns():
+    _rebuild_cache()
+    return _CACHED_VISIBLE_COLUMNS
+
+def set_column_visibility(visible_names):
+    visible_set = set(visible_names)
+    definitions = load_column_definitions()
+    for col in definitions:
+        col["visible"] = col.get("name") in visible_set
+    save_column_definitions(definitions)
+
+def evaluate_formulas(df: pd.DataFrame) -> pd.DataFrame:
+    """Ultra-fast, zero-IO, precompiled formula evaluator."""
+    _rebuild_cache()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_CACHED_DISPLAY_ORDER)
+
+    output_df = df.copy()
+
+    # Fast column renaming via direct dictionary map
+    col_mapping = {col: _sanitize_col_name(col) for col in output_df.columns}
+    working_df = output_df.rename(columns=col_mapping)
+
+    # Local namespace containing references to series and custom functions
+    eval_scope = dict(ENV)
+    for col in working_df.columns:
+        eval_scope[col] = pd.to_numeric(working_df[col], errors="coerce").fillna(0.0)
+
+    # Execute bytecode in dependency order
+    for step in _CACHED_EXECUTION_PLAN:
+        target = step["target"]
+        try:
+            if step["is_if"]:
+                p0, p1, p2 = step["parts"]
+                cond = eval(p0, eval_scope)
+                val_t = eval(p1, eval_scope)
+                val_f = eval(p2, eval_scope)
+                res = np.where(cond, val_t, val_f)
+            else:
+                res = eval(step["code"], eval_scope)
+
+            res = pd.to_numeric(pd.Series(res, index=output_df.index), errors="coerce").replace([np.inf, -np.inf], 0.0).fillna(0.0)
+            eval_scope[target] = res
+
+            real_col_name = _CACHED_RENAME_MAP.get(target, target)
+            output_df[real_col_name] = res
+        except Exception:
+            real_col_name = _CACHED_RENAME_MAP.get(target, target)
+            output_df[real_col_name] = 0.0
+
+    # Retain strictly integer typing for Index
+    if "Index" in output_df.columns:
+        output_df["Index"] = pd.to_numeric(output_df["Index"], errors="coerce").fillna(0).astype(int)
+
+# Ensure all configured columns exist
+    for col in _CACHED_DISPLAY_ORDER:
+        if col not in output_df.columns:
+            output_df[col] = np.nan
+
+    # Fast column projection without full iteration
+    available = [c for c in _CACHED_DISPLAY_ORDER if c in output_df.columns]
+    return output_df[available]
+
+
+==================================================
+FILE: \core\portfolio_service.py
+==================================================
+import os
+import pandas as pd
+from core.storage_manager import CSV_FILE, load_mock_portfolio
+
+def apply_mock_portfolio(df):
+    if df is None or df.empty:
+        return df
+    mock_df = load_mock_portfolio()
+    if mock_df.empty or "Stock Name" not in df.columns:
+        return df
+
+    df = df.copy()
+    mock_mapping = mock_df.set_index("Stock Name")
+
+    override_cols = ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
+    for col in override_cols:
+        if col in mock_mapping.columns:
+            mapped = df["Stock Name"].map(mock_mapping[col])
+            if col not in df.columns:
+                df[col] = mapped
+            else:
+                df[col] = mapped.where(mapped.notna(), df[col])
+            
+    return df
+
+def ensure_backend_data_loaded():
+    try:
+        if not os.path.exists(CSV_FILE):
+            with open(CSV_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+    except Exception as e:
+        print(f"Preflight sync warning: {e}")
+
+def get_clean_data():
+    if not os.path.exists(CSV_FILE):
+        return pd.DataFrame()
+    try:
+        if os.path.getsize(CSV_FILE) == 0:
+            return pd.DataFrame()
+        df = pd.read_csv(CSV_FILE)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df = apply_mock_portfolio(df)
+    
+    if not df.empty and 'CMP' in df.columns:
+        df['Quantity'] = pd.to_numeric(df.get('Quantity', 0), errors='coerce').fillna(0)
+        buy_price_series = pd.to_numeric(df.get('Buy Price', pd.NA), errors='coerce')
+        avg_price_series = pd.to_numeric(df.get('Average Price', 0), errors='coerce')
+        df['Effective_Buy_Price'] = buy_price_series.combine_first(avg_price_series).fillna(0)
+        df['CMP'] = pd.to_numeric(df['CMP'], errors='coerce').fillna(0)
+        
+        if 'Sell Price' not in df.columns: df['Sell Price'] = pd.NA
+        if 'Side' not in df.columns: df['Side'] = 'LONG'
+        if 'Status' not in df.columns: df['Status'] = 'OPEN'
+        if 'PD Volume' not in df.columns: df['PD Volume'] = pd.NA
+        
+        df['Total Invested'] = df['Quantity'] * df['Effective_Buy_Price']
+        
+        is_wl = df['Type'] == 'Watchlist'
+        df['Current Value'] = df['Total Invested'] 
+        
+        for idx in df[is_wl].index:
+            q = df.loc[idx, 'Quantity']
+            bp = df.loc[idx, 'Effective_Buy_Price']
+            sp = pd.to_numeric(df.loc[idx, 'Sell Price'], errors='coerce')
+            c = df.loc[idx, 'CMP']
+            s = str(df.loc[idx, 'Side']).upper()
+            st_val = str(df.loc[idx, 'Status']).upper()
+            
+            if st_val == "CLOSED" and not pd.isna(sp):
+                df.loc[idx, 'Current Value'] = sp * q
+                df.loc[idx, 'Net P&L'] = (bp - sp) * q if s == "SHORT" else (sp - bp) * q
+            else:
+                df.loc[idx, 'Current Value'] = c * q
+                df.loc[idx, 'Net P&L'] = (bp - c) * q if s == "SHORT" else (c - bp) * q
+                    
+        is_hold = df['Type'] == 'Holding'
+        df.loc[is_hold, 'Current Value'] = df.loc[is_hold, 'Quantity'] * df.loc[is_hold, 'CMP']
+        df.loc[is_hold, 'Net P&L'] = df.loc[is_hold, 'Current Value'] - df.loc[is_hold, 'Total Invested']
+        
+    return df
+
+
+==================================================
+FILE: \core\storage_manager.py
+==================================================
+import os
+import pandas as pd
+from core.formula_engine import get_visible_columns, set_column_visibility
+
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV_FILE = os.path.join(APP_DIR, "portfolio.csv")
+WATCHLIST_FILE = os.path.join(APP_DIR, "watchlist.txt")
+MOCK_PORTFOLIO_FILE = os.path.join(APP_DIR, "mock_portfolio.csv")
+
+_CACHED_MOCK_PORTFOLIO = None
+_LAST_MOCK_MTIME = 0
+MOCK_SCHEMA = ["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
+
+def load_column_prefs():
+    return get_visible_columns()
+
+def save_column_prefs(visible_cols_list):
+    set_column_visibility(visible_cols_list)
+
+def ensure_mock_portfolio_file():
+    if not os.path.exists(MOCK_PORTFOLIO_FILE):
+        pd.DataFrame(columns=MOCK_SCHEMA).to_csv(MOCK_PORTFOLIO_FILE, index=False)
+
+def load_mock_portfolio():
+    global _CACHED_MOCK_PORTFOLIO, _LAST_MOCK_MTIME
+    ensure_mock_portfolio_file()
+    try:
+        current_mtime = os.stat(MOCK_PORTFOLIO_FILE).st_mtime_ns
+    except OSError:
+        current_mtime = -1
+
+    if _CACHED_MOCK_PORTFOLIO is not None and current_mtime == _LAST_MOCK_MTIME:
+        return _CACHED_MOCK_PORTFOLIO
+
+    try:
+        df = pd.read_csv(MOCK_PORTFOLIO_FILE)
+        if df.empty or "Stock Name" not in df.columns:
+            _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=MOCK_SCHEMA)
+        else:
+            df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
+            for col in MOCK_SCHEMA:
+                if col not in df.columns:
+                    df[col] = 0 if col == "PD Volume" else pd.NA
+            _CACHED_MOCK_PORTFOLIO = df.reset_index(drop=True)
+    except Exception:
+        _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=MOCK_SCHEMA)
+    
+    _LAST_MOCK_MTIME = current_mtime
+    return _CACHED_MOCK_PORTFOLIO
+
+def save_mock_portfolio(df):
+    df.to_csv(MOCK_PORTFOLIO_FILE, index=False)
+
+def load_watchlist_tickers():
+    if not os.path.exists(WATCHLIST_FILE):
+        return []
+    with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+        return [line.strip().upper() for line in f if line.strip()]
+
+def save_watchlist_tickers(tickers):
+    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(tickers) + ("\n" if tickers else ""))
+
+def append_watchlist_tickers(tickers):
+    with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
+        f.write("\n" + "\n".join(tickers) + "\n")
+
+
+==================================================
+FILE: \core\symbol_catalog.py
+==================================================
+import io
+import re
+import requests
+import pandas as pd
+import streamlit as st
+import backend_updater
+
+@st.cache_data(ttl=86400)
+def get_universal_name_map():
+    name_map = getattr(backend_updater, "BASE_NAME_MAP", {}).copy()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        eq_res = requests.get("https://archives.nseindia.com/content/equities/EQUITY_L.csv", headers=headers, timeout=10)
+        if eq_res.status_code == 200:
+            df_eq = pd.read_csv(io.StringIO(eq_res.text))
+            df_eq.columns = df_eq.columns.str.strip()
+            if 'SYMBOL' in df_eq.columns and 'NAME OF COMPANY' in df_eq.columns:
+                stock_dict = {f"{str(sym).strip()}:NSE": str(name).strip() for sym, name in zip(df_eq['SYMBOL'], df_eq['NAME OF COMPANY'])}
+                name_map.update(stock_dict)
+    except Exception: pass
+
+    try:
+        etf_res = requests.get("https://archives.nseindia.com/content/equities/eq_etfseclist.csv", headers=headers, timeout=10)
+        if etf_res.status_code == 200:
+            df_etf = pd.read_csv(io.StringIO(etf_res.text))
+            df_etf.columns = df_etf.columns.str.strip()
+            if 'Symbol' in df_etf.columns and 'Security Name' in df_etf.columns:
+                etf_dict = {f"{str(sym).strip()}:NSE": str(name).strip() for sym, name in zip(df_etf['Symbol'], df_etf['Security Name'])}
+                name_map.update(etf_dict)
+    except Exception: pass
+
+    return name_map
+
+def parse_angel_fo_symbol(symbol, base_name):
+    if not base_name or not symbol.startswith(base_name): return "Derivative Contract", "F&O"
+    remainder = symbol[len(base_name):]
+    match = re.match(r'^(\d{2}[A-Z]{3}\d{2})(.*)$', remainder)
+    if match:
+        expiry = match.group(1)
+        rest = match.group(2)
+        exp_fmt = f"{expiry[:2]}-{expiry[2:5].capitalize()}-{expiry[5:]}"
+        if 'FUT' in rest: return f"{exp_fmt} FUT", "FUT"
+        elif rest.endswith('CE') or rest.endswith('PE'):
+            opt_type = rest[-2:]
+            strike = rest[:-2]
+            if strike.endswith('00') and len(strike) > 3: strike = strike[:-2] + ".00"
+            elif strike.endswith('0') and len(strike) > 3: strike = strike[:-1] + ".0"
+            return f"{exp_fmt} {strike} {opt_type}", "OPT"
+    return "Derivative Contract", "F&O"
+
+@st.cache_data(ttl=3600)
+def get_all_indexed_symbols():
+    master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
+    exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
+    segment_map = getattr(backend_updater, "SEGMENT_MAP", {}) or {}
+    universal_names = get_universal_name_map()
+
+    items = []
+    seen = set()
+    for unique_key, token in (master or {}).items():
+        if ":" not in unique_key: continue
+        clean, exchange = unique_key.split(":", 1)
+        
+        if not clean or not str(token).strip() or unique_key in seen: continue
+        seen.add(unique_key)
+
+        segment = str(segment_map.get(unique_key, "EQ")).upper()
+        full_name = universal_names.get(unique_key, "")
+
+        if segment == "F&O":
+            sub_text, fo_tag = parse_angel_fo_symbol(clean, full_name)
+            display_exch = "NSE FO" if exchange == "NFO" else exchange
+            label = f"{clean} [{display_exch} {fo_tag}] â€¢ {sub_text}"
+        else:
+            sub_text = full_name if (full_name and full_name.upper() != clean) else "Equity"
+            label = f"{clean} [{exchange} {segment}] â€¢ {sub_text}"
+
+        search_key = f"{clean} {full_name} {sub_text}".lower()
+        items.append({
+            "unique_key": unique_key, "symbol": clean, "exchange": exchange,
+            "segment": segment, "label": label, "search_key": search_key
+        })
+
+    exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3, "CDS": 4, "NCO": 5, "BFO": 6}
+    segment_rank = {"EQ": 0, "ETF": 1, "MF": 2, "F&O": 3, "COM": 4, "CUR": 5}
+    items.sort(key=lambda x: (exchange_rank.get(x["exchange"], 99), segment_rank.get(x["segment"], 99), x["symbol"]))
+    return items
+
+
+==================================================
+FILE: \core\__init__.py
+==================================================
+
+
+==================================================
+FILE: \views\demat_display.py
+==================================================
+import numpy as np
+import pandas as pd
+from core.formula_engine import evaluate_formulas, get_configured_column_order
+
+ORDERED_COLUMNS = get_configured_column_order()
+
+def _safe_numeric(value, index=None):
+    result = pd.to_numeric(value, errors="coerce")
+    if isinstance(result, pd.Series): return result
+    if index is None: return pd.Series([result])
+    return pd.Series([result] * len(index), index=index)
+
+def build_demat_display_frame(df):
+    current_order = get_configured_column_order()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=current_order)
+
+    rows = df.copy().reset_index(drop=True)
+
+    exchange = rows.get("Exchange", pd.Series(["NSE"] * len(rows), index=rows.index)).fillna("NSE").astype(str)
+    cmp = _safe_numeric(rows.get("CMP", pd.NA), index=rows.index)
+    pc = _safe_numeric(rows.get("PC", pd.NA), index=rows.index)
+    day_high = _safe_numeric(rows.get("Day High", pd.NA), index=rows.index)
+    volume = _safe_numeric(rows.get("Volume", pd.NA), index=rows.index)
+    
+    quantity = _safe_numeric(rows.get("Quantity", 0), index=rows.index)
+    avg_price = _safe_numeric(rows.get("Average Price", 0), index=rows.index)
+    buy_price_override = _safe_numeric(rows.get("Buy Price", pd.NA), index=rows.index)
+    
+    buy_price = buy_price_override.combine_first(avg_price)
+    buy_price = pd.to_numeric(buy_price, errors="coerce")
+    
+    buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
+    
+    d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
+    dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
+    s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
+    pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
+
+    # Use incoming broker column or default to Angel One
+    broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
+
+    base_frame = pd.DataFrame({
+        "Index": range(1, len(rows) + 1),
+        "Stock Name": rows.get("Stock Name", ""),
+        "NSE/BSE etc": exchange,
+        "EQ etc": "EQ",
+        "CMP": cmp,
+        "PC": pc,
+        "Quantity": quantity,
+        "Buy Date": buy_date,
+        "Buy Price": buy_price,
+        "Sell Date": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "Sell Price": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "DH%": dh_pct,
+        "D%": d_pct,
+        "SAlert": s_alert,
+        "placeholder": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "PMC": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "Volume": volume,
+        "PD Volume": pd_vol,
+        "Broker": broker_series,
+    })
+
+    output = evaluate_formulas(base_frame)
+
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume", "Broker"}
+    for col in output.columns:
+        if col not in non_numeric:
+            output[col] = pd.to_numeric(output[col], errors="coerce")
+
+    if "Index" in output.columns:
+        output["Index"] = pd.to_numeric(output["Index"], errors="coerce").fillna(0).astype(int)
+
+    return output
+
+def style_demat_table(df):
+    if df is None or df.empty: return df
+
+    def format_cells(val):
+        if isinstance(val, (int, np.integer)):
+            return f"{val}"
+        if isinstance(val, (float, np.floating)) and not pd.isna(val):
+            return f"{val:.2f}"
+        return val
+
+    styler = df.style.format(format_cells, na_rep="NA")
+
+    def highlight_cells(row):
+        styles = ['' for _ in row]
+        for idx, col_name in enumerate(row.index):
+            val = row[col_name]
+            
+            if col_name in ["D%", "% Profit"]:
+                try:
+                    num = float(val)
+                    if num > 0: styles[idx] = "background-color: #1f9d55; color: white;"
+                    elif num < 0: styles[idx] = "background-color: #d64545; color: white;"
+                    else: styles[idx] = "background-color: #e5e7eb; color: #111827;"
+                except (ValueError, TypeError): pass
+            
+            elif col_name == "SAlert":
+                try:
+                    num = float(val)
+                    if num < -5:
+                        styles[idx] = "background-color: #ca8a04; color: white;"
+                except (ValueError, TypeError): pass
+                
+        return styles
+
+    return styler.apply(highlight_cells, axis=1)
+
+
+==================================================
+FILE: \views\watchlist_display.py
+==================================================
+import numpy as np
+import pandas as pd
+from core.formula_engine import evaluate_formulas, get_configured_column_order
+
+ORDERED_COLUMNS = get_configured_column_order()
+
+def _safe_numeric(value, index=None):
+    result = pd.to_numeric(value, errors="coerce")
+    if isinstance(result, pd.Series): return result
+    if index is None: return pd.Series([result])
+    return pd.Series([result] * len(index), index=index)
+
+def build_watchlist_display_frame(df):
+    current_order = get_configured_column_order()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=current_order)
+
+    rows = df.copy().reset_index(drop=True)
+
+    exchange = rows.get("Exchange", pd.Series(["NSE"] * len(rows), index=rows.index)).fillna("NSE").astype(str)
+    cmp = _safe_numeric(rows.get("CMP", pd.NA), index=rows.index)
+    pc = _safe_numeric(rows.get("PC", pd.NA), index=rows.index)
+    day_high = _safe_numeric(rows.get("Day High", pd.NA), index=rows.index)
+    volume = _safe_numeric(rows.get("Volume", pd.NA), index=rows.index)
+    
+    quantity = _safe_numeric(rows.get("Quantity", 0), index=rows.index)
+    buy_price = _safe_numeric(rows.get("Buy Price", pd.NA), index=rows.index)
+    buy_date = rows.get("Buy Date", pd.Series([pd.NA] * len(rows), index=rows.index))
+    
+    sell_price = _safe_numeric(rows.get("Sell Price", pd.NA), index=rows.index)
+    side = rows.get("Side", pd.Series(["LONG"] * len(rows), index=rows.index)).astype(str).str.upper()
+    status = rows.get("Status", pd.Series(["OPEN"] * len(rows), index=rows.index)).astype(str).str.upper()
+
+    d_pct = _safe_numeric(rows.get("D%", pd.NA), index=rows.index)
+    dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
+    s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
+    pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
+
+    # Use incoming broker column or default to Angel One
+    broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
+
+    base_frame = pd.DataFrame({
+        "Index": range(1, len(rows) + 1),
+        "Stock Name": rows.get("Stock Name", ""),
+        "NSE/BSE etc": exchange,
+        "EQ etc": "EQ",
+        "CMP": cmp,
+        "PC": pc,
+        "Quantity": quantity,
+        "Buy Date": buy_date,
+        "Buy Price": buy_price,
+        "Sell Date": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "Sell Price": sell_price,
+        "DH%": dh_pct,
+        "D%": d_pct,
+        "SAlert": s_alert,
+        "placeholder": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "PMC": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "Volume": volume,
+        "PD Volume": pd_vol,
+        "Broker": broker_series,
+    })
+
+    # Override CMP with Sell Price for closed mock positions
+    for idx in rows.index:
+        q = quantity.loc[idx]
+        sp = sell_price.loc[idx]
+        st_val = status.loc[idx]
+        if pd.notna(q) and q > 0 and st_val == "CLOSED" and pd.notna(sp):
+            base_frame.loc[idx, "CMP"] = sp
+
+    output = evaluate_formulas(base_frame)
+
+    if "Profit" in output.columns:
+        for idx in rows.index:
+            if side.loc[idx] == "SHORT" and pd.notna(output.loc[idx, "Profit"]):
+                output.loc[idx, "Profit"] = -output.loc[idx, "Profit"]
+                if "% Profit" in output.columns and pd.notna(output.loc[idx, "% Profit"]):
+                    output.loc[idx, "% Profit"] = -output.loc[idx, "% Profit"]
+
+    non_numeric = {"Index", "Stock Name", "NSE/BSE etc", "EQ etc", "Buy Date", "Sell Date", "placeholder", "PMC", "M %", "Vol%", "PD Volume", "Broker"}
+    for col in output.columns:
+        if col not in non_numeric:
+            output[col] = pd.to_numeric(output[col], errors="coerce")
+
+    if "Index" in output.columns:
+        output["Index"] = pd.to_numeric(output["Index"], errors="coerce").fillna(0).astype(int)
+
+    return output
+
+def style_watchlist_table(df):
+    if df is None or df.empty: return df
+
+    def format_cells(val):
+        if isinstance(val, (int, np.integer)):
+            return f"{val}"
+        if isinstance(val, (float, np.floating)) and not pd.isna(val):
+            return f"{val:.2f}"
+        return val
+
+    styler = df.style.format(format_cells, na_rep="NA")
+
+    def highlight_cells(row):
+        styles = ['' for _ in row]
+        for idx, col_name in enumerate(row.index):
+            val = row[col_name]
+            
+            if col_name in ["D%", "% Profit"]:
+                try:
+                    num = float(val)
+                    if num > 0: styles[idx] = "background-color: #1f9d55; color: white;"
+                    elif num < 0: styles[idx] = "background-color: #d64545; color: white;"
+                    else: styles[idx] = "background-color: #e5e7eb; color: #111827;"
+                except (ValueError, TypeError): pass
+            
+            elif col_name == "SAlert":
+                try:
+                    num = float(val)
+                    if num < -5:
+                        styles[idx] = "background-color: #ca8a04; color: white;"
+                except (ValueError, TypeError): pass
+                
+        return styles
+
+    return styler.apply(highlight_cells, axis=1)
+
+
+==================================================
+FILE: \views\__init__.py
+==================================================
+
+

@@ -1,17 +1,22 @@
 import os
 import pandas as pd
-import backend_updater
-from core.storage_manager import CSV_FILE, load_mock_portfolio
+from brokers.config import get_active_broker_name
+from core.storage_manager import load_mock_portfolio, APP_DIR
+
+def get_broker_csv(broker_name: str | None = None) -> str:
+    name = (broker_name or get_active_broker_name()).lower().strip()
+    return os.path.join(APP_DIR, f"portfolio_{name}.csv")
 
 def apply_mock_portfolio(df):
-    if df is None or df.empty: return df
+    if df is None or df.empty:
+        return df
     mock_df = load_mock_portfolio()
-    if mock_df.empty or "Stock Name" not in df.columns: return df
+    if mock_df.empty or "Stock Name" not in df.columns:
+        return df
 
     df = df.copy()
     mock_mapping = mock_df.set_index("Stock Name")
 
-    # Include 'PD Volume' in the override fields
     override_cols = ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
     for col in override_cols:
         if col in mock_mapping.columns:
@@ -24,23 +29,27 @@ def apply_mock_portfolio(df):
     return df
 
 def ensure_backend_data_loaded():
+    target_csv = get_broker_csv()
     try:
-        if not os.path.exists(CSV_FILE):
-            with open(CSV_FILE, "w", encoding="utf-8") as f: f.write("")
-        if os.path.getsize(CSV_FILE) == 0:
-            current_portfolio = backend_updater.sync_portfolio_registry(None)
-            backend_updater.stream_tick_cycle(current_portfolio)
+        if not os.path.exists(target_csv):
+            with open(target_csv, "w", encoding="utf-8") as f:
+                f.write("")
     except Exception as e:
         print(f"Preflight sync warning: {e}")
 
 def get_clean_data():
-    if not os.path.exists(CSV_FILE): return pd.DataFrame()
+    target_csv = get_broker_csv()
+    if not os.path.exists(target_csv):
+        return pd.DataFrame()
     try:
-        df = pd.read_csv(CSV_FILE)
+        if os.path.getsize(target_csv) == 0:
+            return pd.DataFrame()
+        df = pd.read_csv(target_csv)
     except Exception:
         return pd.DataFrame()
 
-    if df.empty: return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
 
     df = apply_mock_portfolio(df)
     
