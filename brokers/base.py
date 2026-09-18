@@ -40,6 +40,7 @@ class BrokerAdapter(ABC):
             "Average Price": float(row.get("Average Price", 0) or 0),
             "CMP": float(row.get("CMP", 0) or 0),
             "PC": float(row.get("PC", 0) or 0),
+            "Day Open": float(row.get("Day Open", 0) or 0),
             "Day High": float(row.get("Day High", row.get("CMP", 0) or 0)),
             "Volume": float(row.get("Volume", 0) or 0),
             "Buy Date": row.get("Buy Date"),

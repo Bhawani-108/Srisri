@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import csv
 import io
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import requests
 import streamlit as st
@@ -203,6 +205,7 @@ class IndMoneyAdapter(BrokerAdapter):
                 raw_token = scrip_key.split("_")[-1]
                 cmp_val = float(val.get("live_price") or val.get("ltp") or 0.0)
                 pc_val = float(val.get("prev_close") or val.get("close") or 0.0)
+                open_val = float(val.get("day_open") or 0.0)
                 high_val = float(val.get("day_high") or val.get("high") or cmp_val)
 
                 records.append(self.normalize_row({
@@ -211,8 +214,73 @@ class IndMoneyAdapter(BrokerAdapter):
                     "Token": raw_token,
                     "CMP": cmp_val,
                     "PC": pc_val,
+                    "Day Open": open_val,
                     "Day High": high_val,
                     "Volume": float(val.get("volume") or 0),
                     "Broker": "indmoney"
                 }))
         return records
+
+    def fetch_daily_baselines(self, tokens: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
+        """Return prior daily closes used for multi-day watchlist performance."""
+        if not tokens:
+            return {}
+
+        codes = []
+        for token in tokens:
+            code = str(token).strip()
+            if code:
+                codes.append(code if "_" in code else f"NSE_{code}")
+
+        baselines: Dict[str, Dict[str, float]] = {}
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - (45 * 24 * 60 * 60 * 1000)
+        for offset in range(0, len(codes), 5):
+            batch = codes[offset:offset + 5]
+            payload = self._request(
+                "GET",
+                "/market/historical/1day",
+                params={
+                    "scrip-codes": ",".join(batch),
+                    "start_time": start_ms,
+                    "end_time": now_ms,
+                },
+            )
+            if not isinstance(payload, dict):
+                continue
+
+            data_block = payload.get("data", {})
+            if not isinstance(data_block, dict):
+                continue
+            for scrip_key, instrument in data_block.items():
+                candles = instrument.get("candles") if isinstance(instrument, dict) else None
+                if not isinstance(candles, list):
+                    continue
+                candles_by_date = []
+                for candle in candles:
+                    try:
+                        close = float(candle.get("c", 0) or 0)
+                        candle_date = datetime.fromtimestamp(
+                            int(candle.get("ts", 0)), timezone.utc
+                        ).date()
+                    except (AttributeError, TypeError, ValueError):
+                        close = 0.0
+                        candle_date = None
+                    if close > 0 and candle_date is not None:
+                        candles_by_date.append((candle_date, close))
+
+                if len(candles_by_date) < 2:
+                    continue
+                raw_token = scrip_key.split("_")[-1]
+                period_offsets = {
+                    "1D%": 1,
+                    "2D%": 2,
+                    "3D%": 3,
+                    "4D%": 4,
+                    "1M%": 26,
+                }
+                baselines[raw_token] = {}
+                for name, days in period_offsets.items():
+                    baseline_index = max(0, len(candles_by_date) - days - 1)
+                    baselines[raw_token][name] = candles_by_date[baseline_index][1]
+        return baselines

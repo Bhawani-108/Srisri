@@ -38,12 +38,14 @@ def _load_raw_secrets():
     return {}
 
 def get_active_broker_name() -> str:
-    candidate = None
-    if get_script_run_ctx() is not None and hasattr(st, "session_state"):
+    # Background workers receive the selected broker through the environment.
+    # Reading Streamlit session state from those workers can raise StopException.
+    candidate = os.getenv("ACTIVE_BROKER")
+    if candidate is None and get_script_run_ctx() is not None and hasattr(st, "session_state"):
         candidate = st.session_state.get("active_broker")
 
     if candidate is None:
-        candidate = os.getenv("ACTIVE_BROKER", DEFAULT_BROKER)
+        candidate = DEFAULT_BROKER
 
     broker_name = str(candidate).strip().lower()
     return broker_name if broker_name in SUPPORTED_BROKERS else DEFAULT_BROKER

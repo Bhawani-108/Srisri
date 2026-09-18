@@ -403,6 +403,8 @@ def sync_ws_subscriptions(df):
 # PORTFOLIO REGISTRY SYNC
 # ==========================================
 BROKER_CACHE = {}
+INDMONEY_HISTORY_CACHE = {}
+INDMONEY_HISTORY_FETCHED_AT = 0.0
 
 def refresh_adapter_quotes(df, adapter):
     """Refresh broker quotes using tokens when available and symbols otherwise."""
@@ -444,9 +446,39 @@ def refresh_adapter_quotes(df, adapter):
         df.at[idx, "CMP"] = float(quote.get("CMP", 0) or 0)
         if float(quote.get("PC", 0) or 0) > 0:
             df.at[idx, "PC"] = float(quote["PC"])
+        if float(quote.get("Day Open", 0) or 0) > 0:
+            df.at[idx, "Day Open"] = float(quote["Day Open"])
         if float(quote.get("Day High", 0) or 0) > 0:
             df.at[idx, "Day High"] = float(quote["Day High"])
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
+
+def refresh_indmoney_history(df, adapter):
+    global INDMONEY_HISTORY_CACHE, INDMONEY_HISTORY_FETCHED_AT
+    if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
+        return
+
+    watchlist = df[df.get("Type", "") == "Watchlist"]
+    tokens = [normalize_token(token) for token in watchlist.get("Token", []) if normalize_token(token)]
+    tokens = list(dict.fromkeys(tokens))
+    if not tokens:
+        return
+
+    now = time.time()
+    if now - INDMONEY_HISTORY_FETCHED_AT >= 300 or not all(token in INDMONEY_HISTORY_CACHE for token in tokens):
+        fetched = adapter.fetch_daily_baselines(tokens)
+        if fetched:
+            INDMONEY_HISTORY_CACHE.update(fetched)
+            INDMONEY_HISTORY_FETCHED_AT = now
+
+    for idx, row in watchlist.iterrows():
+        token = normalize_token(row.get("Token", ""))
+        baselines = INDMONEY_HISTORY_CACHE.get(token, {})
+        current = float(row.get("CMP", 0) or 0)
+        for name, baseline in baselines.items():
+            df.at[idx, name] = ((current - baseline) / baseline) * 100 if baseline > 0 else 0.0
+        day_open = float(row.get("Day Open", 0) or 0)
+        if day_open > 0 and current > 0:
+            df.at[idx, "1W%"] = ((current - day_open) / day_open) * 100
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE
@@ -462,6 +494,8 @@ def sync_portfolio_registry(current_df=None):
             if combined:
                 df = pd.DataFrame(combined)
                 refresh_adapter_quotes(df, adapter)
+                if active_broker == "indmoney":
+                    refresh_indmoney_history(df, adapter)
                 BROKER_CACHE[active_broker] = df
                 return df
         except Exception as e:
@@ -619,6 +653,8 @@ def stream_tick_cycle(df):
         try:
             adapter = get_active_broker_adapter()
             refresh_adapter_quotes(df, adapter)
+            if active_broker == "indmoney":
+                refresh_indmoney_history(df, adapter)
         except Exception:
             pass
     else:
