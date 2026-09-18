@@ -10,6 +10,7 @@ from brokers.config import get_active_broker_name, get_supported_brokers
 from core.formula_engine import get_configured_column_order
 from core.storage_manager import load_column_prefs, save_column_prefs
 from core.portfolio_service import ensure_backend_data_loaded, get_clean_data
+from core.symbol_catalog import get_all_indexed_symbols
 from components.sidebar import render_sidebar
 from components.mock_editor import render_mock_portfolio_editor
 from views.demat_display import build_demat_display_frame, style_demat_table
@@ -57,6 +58,7 @@ selected_broker = st.selectbox(
 if selected_broker != st.session_state.active_broker:
     st.session_state.active_broker = selected_broker
     os.environ["ACTIVE_BROKER"] = str(selected_broker).strip().lower()
+    get_all_indexed_symbols.clear()
     backend_updater.LAST_WATCHLIST_MTIME = 0
     backend_updater.LAST_SYNCED_BROKER = None
     with st.spinner(f"Switching feed to {selected_broker}..."):

@@ -20,6 +20,8 @@ class IndMoneyAdapter(BrokerAdapter):
         self.config = config or {}
         self.base_url = self.config.get("base_url", "https://api.indstocks.com").rstrip("/")
         self._equity_instruments: Optional[Dict[tuple[str, str], str]] = None
+        self._equity_instrument_names: Dict[tuple[str, str], str] = {}
+        self._equity_instrument_symbols: Dict[tuple[str, str], str] = {}
         
         token = ""
         if hasattr(st, "secrets"):
@@ -92,17 +94,43 @@ class IndMoneyAdapter(BrokerAdapter):
                     security_id = str(row.get("SECURITY_ID", "")).strip()
                     if not exchange or not security_id:
                         continue
+                    display_name = str(
+                        row.get("SYMBOL_NAME") or row.get("CUSTOM_SYMBOL") or ""
+                    ).strip()
+                    trading_symbol = str(row.get("TRADING_SYMBOL", "")).strip().upper()
+                    instrument_key = (exchange, security_id)
+                    if trading_symbol:
+                        self._equity_instrument_symbols.setdefault(instrument_key, trading_symbol)
                     for field in ("TRADING_SYMBOL", "SYMBOL_NAME", "CUSTOM_SYMBOL"):
                         value = str(row.get(field, "")).strip().upper()
                         if value:
-                            instrument_map.setdefault(
-                                (exchange, value.split("-")[0]), security_id
-                            )
+                            key = (exchange, value.split("-")[0])
+                            instrument_map.setdefault(key, security_id)
+                            if display_name:
+                                self._equity_instrument_names.setdefault(key, display_name)
         except Exception:
             instrument_map = {}
 
         self._equity_instruments = instrument_map
         return instrument_map
+
+    def get_equity_instrument_catalog(self) -> List[Dict[str, str]]:
+        """Return searchable INDmoney equity symbols with display names."""
+        instrument_map = self._get_equity_instrument_map()
+        catalog = {}
+        for (exchange, symbol), token in instrument_map.items():
+            if exchange not in {"NSE", "BSE"} or not token:
+                continue
+            key = (exchange, token)
+            canonical_symbol = self._equity_instrument_symbols.get(key, symbol)
+            catalog[key] = {
+                "exchange": exchange,
+                "symbol": canonical_symbol,
+                "token": token,
+                "name": self._equity_instrument_names.get((exchange, canonical_symbol),
+                    self._equity_instrument_names.get((exchange, symbol), canonical_symbol)),
+            }
+        return list(catalog.values())
 
     def login(self) -> bool:
         return bool(self.access_token)

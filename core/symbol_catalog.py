@@ -4,6 +4,8 @@ import requests
 import pandas as pd
 import streamlit as st
 import backend_updater
+from brokers.config import get_active_broker_name
+from brokers.manager import get_active_broker_adapter
 
 @st.cache_data(ttl=86400)
 def get_universal_name_map():
@@ -50,7 +52,31 @@ def parse_angel_fo_symbol(symbol, base_name):
     return "Derivative Contract", "F&O"
 
 @st.cache_data(ttl=3600)
-def get_all_indexed_symbols():
+def get_all_indexed_symbols(broker_name=None):
+    active_broker = str(broker_name or get_active_broker_name()).strip().lower()
+
+    if active_broker == "indmoney":
+        adapter = get_active_broker_adapter()
+        instrument_catalog = adapter.get_equity_instrument_catalog()
+        items = []
+        for instrument in instrument_catalog:
+            exchange = instrument["exchange"]
+            symbol = instrument["symbol"]
+            token = instrument["token"]
+            name = instrument["name"]
+            if not symbol or not token:
+                continue
+            items.append({
+                "unique_key": f"{symbol}:{exchange}",
+                "symbol": symbol,
+                "exchange": exchange,
+                "segment": "EQ",
+                "name": name,
+                "label": f"{symbol} [{exchange} EQ] • {name}",
+                "search_key": f"{symbol} {name} {exchange}".lower(),
+            })
+        return sorted(items, key=lambda item: (item["exchange"], item["symbol"]))
+
     master = getattr(backend_updater, "TOKEN_MAP", {}) or {}
     exchange_map = getattr(backend_updater, "EXCHANGE_MAP", {}) or {}
     segment_map = getattr(backend_updater, "SEGMENT_MAP", {}) or {}
@@ -79,7 +105,7 @@ def get_all_indexed_symbols():
         search_key = f"{clean} {full_name} {sub_text}".lower()
         items.append({
             "unique_key": unique_key, "symbol": clean, "exchange": exchange,
-            "segment": segment, "label": label, "search_key": search_key
+            "segment": segment, "name": full_name, "label": label, "search_key": search_key
         })
 
     exchange_rank = {"NSE": 0, "BSE": 1, "NFO": 2, "MCX": 3, "CDS": 4, "NCO": 5, "BFO": 6}
