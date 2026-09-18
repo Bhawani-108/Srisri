@@ -2,7 +2,7 @@ import os
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-DEFAULT_BROKER = "angel_one"
+DEFAULT_BROKER = "indmoney"  # Set to "indmoney" locally so background threads default to it
 SUPPORTED_BROKERS = ("angel_one", "indmoney", "us_stocks")
 
 def _load_raw_secrets():

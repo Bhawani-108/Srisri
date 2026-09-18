@@ -14,7 +14,6 @@ class USStocksAdapter(BrokerAdapter):
     def fetch_positions(self) -> List[Dict[str, Any]]:
         csv_file = "us_holdings.csv"
         if not os.path.exists(csv_file):
-            # Create sample template
             sample = pd.DataFrame([
                 {"Stock Name": "AAPL", "Quantity": 2, "Buy Price": 185.50, "Buy Date": "2024-01-15"},
                 {"Stock Name": "NVDA", "Quantity": 5, "Buy Price": 110.00, "Buy Date": "2024-03-10"},
@@ -42,7 +41,7 @@ class USStocksAdapter(BrokerAdapter):
                     "Average Price": buy_p,
                     "Buy Price": buy_p,
                     "CMP": buy_p,
-                    "PC": buy_p,
+                    "PC": 0.0,  # Populated with true previous close in fetch_quotes
                     "Day High": buy_p,
                     "Volume": 0,
                     "Broker": "us_stocks"
@@ -63,7 +62,7 @@ class USStocksAdapter(BrokerAdapter):
                 fast = getattr(tickers.tickers.get(sym), "fast_info", None)
                 if fast:
                     cmp_ = float(fast.last_price or 0.0)
-                    pc_ = float(fast.previous_close or cmp_)
+                    pc_ = float(fast.previous_close or 0.0)  # Never fall back to cmp_
                     high_ = float(fast.day_high or cmp_)
                     vol_ = float(fast.last_volume or 0)
                     results.append(self.normalize_row({

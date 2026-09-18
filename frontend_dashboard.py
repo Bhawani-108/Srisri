@@ -21,6 +21,13 @@ if os.path.exists("styles.css"):
     with open("styles.css", "r", encoding="utf-8") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
+# Broker Switcher State Management (Initialized before background daemon starts)
+if "active_broker" not in st.session_state:
+    st.session_state.active_broker = get_active_broker_name()
+
+# Stamp environment variable immediately on initial boot for all daemon threads
+os.environ["ACTIVE_BROKER"] = str(st.session_state.active_broker).strip().lower()
+
 # Start background updater singleton
 @st.cache_resource
 def start_background_engine():
@@ -39,10 +46,6 @@ def start_background_engine():
     t.start()
     return t
 
-# Broker Switcher State Management
-if "active_broker" not in st.session_state:
-    st.session_state.active_broker = get_active_broker_name()
-
 broker_options = get_supported_brokers()
 selected_broker = st.selectbox(
     "Select Active Broker Integration",
@@ -53,7 +56,7 @@ selected_broker = st.selectbox(
 
 if selected_broker != st.session_state.active_broker:
     st.session_state.active_broker = selected_broker
-    os.environ["ACTIVE_BROKER"] = selected_broker
+    os.environ["ACTIVE_BROKER"] = str(selected_broker).strip().lower()
     backend_updater.LAST_WATCHLIST_MTIME = 0
     backend_updater.LAST_SYNCED_BROKER = None
     with st.spinner(f"Switching feed to {selected_broker}..."):
@@ -70,15 +73,19 @@ render_sidebar()
 
 # Main Header
 st.title("📊 Live Portfolio & Market Watchlist")
-broker_label = "Angel One SmartAPI" if selected_broker == "angel_one" else ("IndMoney API" if selected_broker == "indmoney" else "US Stocks")
-st.caption(f"Live feed via {broker_label} • Streaming updates every 2s")
+broker_label = (
+    "Angel One SmartAPI"
+    if selected_broker == "angel_one"
+    else ("IndMoney API" if selected_broker == "indmoney" else "US Stocks")
+)
+st.caption(f"Live feed via {broker_label} • Streaming updates every 1s")
 
 view_mode = st.pills(
     "Select Table View",
     options=["💼 Demat Holdings", "👀 Market Watchlist"],
     default="💼 Demat Holdings",
     key="view_mode_pills",
-    label_visibility="collapsed"
+    label_visibility="collapsed",
 )
 st.divider()
 
@@ -99,7 +106,7 @@ with st.expander("👁️ Column Visibility Manager", expanded=False):
                 col, 
                 value=col in current_visible_cols, 
                 key=f"cent_col_chk_{col}",
-                on_change=update_centralized_prefs
+                on_change=update_centralized_prefs,
             )
 
 st.divider()
@@ -109,10 +116,10 @@ render_mock_portfolio_editor()
 st.divider()
 
 # Live Table & Metric Stream Fragment
-@st.fragment(run_every="2s")
+@st.fragment(run_every="1s")
 def live_dashboard():
     df = get_clean_data()
-    if df.empty or 'Type' not in df.columns:
+    if df.empty or "Type" not in df.columns:
         st.info("Syncing backend data stream...")
         return
 
@@ -121,26 +128,29 @@ def live_dashboard():
     if "Broker" in df.columns:
         df = df[df["Broker"].str.lower() == active_broker_name].copy()
 
-    holdings_df = df[df['Type'] == 'Holding'].copy().sort_values(by="Stock Name")
-    watchlist_df = df[df['Type'] == 'Watchlist'].copy().sort_values(by="Stock Name")
+    holdings_df = df[df["Type"] == "Holding"].copy().sort_values(by="Stock Name")
+    watchlist_df = df[df["Type"] == "Watchlist"].copy().sort_values(by="Stock Name")
 
-    active_df = holdings_df if view_mode == "💼 Demat Holdings" else watchlist_df
+    is_watchlist_view = "Watchlist" in str(view_mode)
+    active_df = watchlist_df if is_watchlist_view else holdings_df
 
-    total_invested = active_df['Total Invested'].sum() if not active_df.empty and 'Total Invested' in active_df.columns else 0.0
-    current_value = active_df['Current Value'].sum() if not active_df.empty and 'Current Value' in active_df.columns else 0.0
-    total_pnl = active_df['Net P&L'].sum() if not active_df.empty and 'Net P&L' in active_df.columns else 0.0
-    portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0) * 100
+    total_invested = active_df["Total Invested"].sum() if not active_df.empty and "Total Invested" in active_df.columns else 0.0
+    current_value = active_df["Current Value"].sum() if not active_df.empty and "Current Value" in active_df.columns else 0.0
+    total_pnl = active_df["Net P&L"].sum() if not active_df.empty and "Net P&L" in active_df.columns else 0.0
+    portfolio_roi = (total_pnl / total_invested if total_invested > 0 else 0.0) * 100
 
     day_change_pct = 0.0
     day_pnl = 0.0
-    if not active_df.empty and 'CMP' in active_df.columns and 'PC' in active_df.columns and 'Quantity' in active_df.columns:
-        prev_close_val = (active_df['Quantity'] * active_df['PC']).sum()
-        curr_val_active = (active_df['Quantity'] * active_df['CMP']).sum()
-        day_pnl = curr_val_active - prev_close_val
-        if prev_close_val > 0:
-            day_change_pct = (day_pnl / prev_close_val) * 100
-        elif view_mode == "👀 Market Watchlist" and 'D%' in active_df.columns:
-            day_change_pct = pd.to_numeric(active_df['D%'], errors='coerce').dropna().mean() or 0.0
+    if not active_df.empty and "CMP" in active_df.columns and "PC" in active_df.columns and "Quantity" in active_df.columns:
+        valid_mask = (active_df["Quantity"] > 0) & (active_df["PC"] > 0) & (active_df["CMP"] > 0)
+        if valid_mask.any():
+            prev_close_val = (active_df.loc[valid_mask, "Quantity"] * active_df.loc[valid_mask, "PC"]).sum()
+            curr_val_active = (active_df.loc[valid_mask, "Quantity"] * active_df.loc[valid_mask, "CMP"]).sum()
+            day_pnl = curr_val_active - prev_close_val
+            if prev_close_val > 0:
+                day_change_pct = (day_pnl / prev_close_val) * 100
+        elif is_watchlist_view and "D%" in active_df.columns:
+            day_change_pct = pd.to_numeric(active_df["D%"], errors="coerce").dropna().mean() or 0.0
 
     pnl_prefix = "-₹" if total_pnl < 0 else "₹"
     pnl_display = f"{pnl_prefix}{abs(total_pnl):,.2f}"
@@ -152,7 +162,7 @@ def live_dashboard():
     col3.metric("Net Profit / Loss", pnl_display, delta=pnl_delta)
     col4.metric("Total ROI", f"{portfolio_roi:.2f}%", delta=f"{portfolio_roi:.2f}%")
 
-    if view_mode == "👀 Market Watchlist" and total_invested == 0:
+    if is_watchlist_view and total_invested == 0:
         col5.metric("1D % Change (Avg)", f"{day_change_pct:+.2f}%", delta=f"{day_change_pct:+.2f}%")
     else:
         day_delta_str = f"-₹{abs(day_pnl):,.2f}" if day_pnl < 0 else f"+₹{abs(day_pnl):,.2f}"
@@ -163,7 +173,7 @@ def live_dashboard():
     visible_cols_set = set(load_column_prefs())
     active_order = get_configured_column_order()
 
-    if view_mode == "💼 Demat Holdings":
+    if not is_watchlist_view:
         if not holdings_df.empty:
             disp = build_demat_display_frame(holdings_df)
             active_cols = [c for c in active_order if c in visible_cols_set and c in disp.columns]

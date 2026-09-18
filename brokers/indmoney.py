@@ -71,11 +71,9 @@ class IndMoneyAdapter(BrokerAdapter):
         records = []
         seen_syms = set()
 
-        # 1. Demat Holdings
         holdings_payload = self._request("GET", "/portfolio/holdings")
         holding_items = self._extract_items(holdings_payload)
 
-        # 2. CNC Positions
         positions_payload = self._request("GET", "/portfolio/positions", params={"segment": "equity", "product": "cnc"})
         position_items = self._extract_items(positions_payload)
 
@@ -86,6 +84,10 @@ class IndMoneyAdapter(BrokerAdapter):
             sec_id = str(row.get("security_id") or row.get("scrip_code") or row.get("token") or "").strip()
             qty = float(row.get("total_qty") or row.get("net_qty") or row.get("quantity") or 0)
             avg_p = float(row.get("avg_price") or row.get("average_price") or 0.0)
+            raw_close = row.get("prev_close") or row.get("close_price") or row.get("close") or 0.0
+            pc_val = float(raw_close or 0.0)
+            raw_cmp = row.get("live_price") or row.get("ltp") or 0.0
+            cmp_val = float(raw_cmp or (pc_val if pc_val > 0 else avg_p))
 
             if sym and qty > 0 and sym not in seen_syms:
                 seen_syms.add(sym)
@@ -97,9 +99,9 @@ class IndMoneyAdapter(BrokerAdapter):
                     "Quantity": qty,
                     "Average Price": avg_p,
                     "Buy Price": avg_p,
-                    "CMP": avg_p,
-                    "PC": avg_p,
-                    "Day High": avg_p,
+                    "CMP": cmp_val,
+                    "PC": pc_val,
+                    "Day High": cmp_val,
                     "Volume": 0,
                     "Broker": "indmoney"
                 }))
@@ -153,19 +155,22 @@ class IndMoneyAdapter(BrokerAdapter):
         data_block = payload.get("data", {})
         records = []
 
-        # INDstocks formats responses as: {"data": {"NSE_1594": {"live_price": ..., "prev_close": ...}}}
         if isinstance(data_block, dict):
             for scrip_key, val in data_block.items():
                 if not isinstance(val, dict):
                     continue
                 raw_token = scrip_key.split("_")[-1]
+                cmp_val = float(val.get("live_price") or val.get("ltp") or 0.0)
+                pc_val = float(val.get("prev_close") or val.get("close") or 0.0)
+                high_val = float(val.get("day_high") or val.get("high") or cmp_val)
+
                 records.append(self.normalize_row({
                     "Stock Name": str(val.get("symbol", "")).upper(),
                     "Exchange": "NSE",
                     "Token": raw_token,
-                    "CMP": float(val.get("live_price") or val.get("ltp") or 0.0),
-                    "PC": float(val.get("prev_close") or val.get("close") or 0.0),
-                    "Day High": float(val.get("day_high") or val.get("high") or 0.0),
+                    "CMP": cmp_val,
+                    "PC": pc_val,
+                    "Day High": high_val,
                     "Volume": float(val.get("volume") or 0),
                     "Broker": "indmoney"
                 }))
