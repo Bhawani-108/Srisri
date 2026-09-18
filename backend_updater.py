@@ -404,6 +404,50 @@ def sync_ws_subscriptions(df):
 # ==========================================
 BROKER_CACHE = {}
 
+def refresh_adapter_quotes(df, adapter):
+    """Refresh broker quotes using tokens when available and symbols otherwise."""
+    if df is None or df.empty:
+        return
+
+    request_keys = []
+    for _, row in df.iterrows():
+        token = normalize_token(row.get("Token", ""))
+        if token:
+            request_keys.append(token)
+            continue
+        symbol = str(row.get("Stock Name", "")).strip()
+        exchange = str(row.get("Exchange", "NSE")).strip().upper()
+        if symbol:
+            request_keys.append(f"{exchange}_{symbol}")
+
+    if not request_keys:
+        return
+
+    quotes = adapter.fetch_quotes(request_keys)
+    token_map = {normalize_token(q.get("Token")): q for q in quotes if q.get("Token")}
+    symbol_map = {
+        (str(q.get("Exchange", "NSE")).upper(), str(q.get("Stock Name", "")).upper()): q
+        for q in quotes
+        if q.get("Stock Name")
+    }
+
+    for idx, row in df.iterrows():
+        token = normalize_token(row.get("Token", ""))
+        symbol_key = (
+            str(row.get("Exchange", "NSE")).upper(),
+            str(row.get("Stock Name", "")).upper(),
+        )
+        quote = token_map.get(token) if token else None
+        quote = quote or symbol_map.get(symbol_key)
+        if not quote:
+            continue
+        df.at[idx, "CMP"] = float(quote.get("CMP", 0) or 0)
+        if float(quote.get("PC", 0) or 0) > 0:
+            df.at[idx, "PC"] = float(quote["PC"])
+        if float(quote.get("Day High", 0) or 0) > 0:
+            df.at[idx, "Day High"] = float(quote["Day High"])
+        df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
+
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
@@ -417,20 +461,7 @@ def sync_portfolio_registry(current_df=None):
             combined = pos + wl
             if combined:
                 df = pd.DataFrame(combined)
-                tokens = [normalize_token(t) for t in df.get("Token", []).dropna() if normalize_token(t)]
-                if tokens:
-                    quotes = adapter.fetch_quotes(tokens)
-                    qmap = {normalize_token(q["Token"]): q for q in quotes if q.get("Token")}
-                    for idx, row in df.iterrows():
-                        tok = normalize_token(row.get("Token", ""))
-                        if tok in qmap:
-                            q = qmap[tok]
-                            df.at[idx, "CMP"] = float(q["CMP"])
-                            if float(q.get("PC", 0)) > 0:
-                                df.at[idx, "PC"] = float(q["PC"])
-                            if float(q.get("Day High", 0)) > 0:
-                                df.at[idx, "Day High"] = float(q["Day High"])
-                            df.at[idx, "Volume"] = float(q.get("Volume", 0))
+                refresh_adapter_quotes(df, adapter)
                 BROKER_CACHE[active_broker] = df
                 return df
         except Exception as e:
@@ -587,20 +618,7 @@ def stream_tick_cycle(df):
     if active_broker in ("indmoney", "us_stocks"):
         try:
             adapter = get_active_broker_adapter()
-            tokens = [normalize_token(t) for t in df.get("Token", []).dropna() if normalize_token(t)]
-            if tokens:
-                quotes = adapter.fetch_quotes(tokens)
-                qmap = {normalize_token(q["Token"]): q for q in quotes if q.get("Token")}
-                for idx, row in df.iterrows():
-                    tok = normalize_token(row.get("Token", ""))
-                    if tok in qmap:
-                        q = qmap[tok]
-                        df.at[idx, "CMP"] = float(q["CMP"])
-                        if float(q.get("PC", 0)) > 0:
-                            df.at[idx, "PC"] = float(q["PC"])
-                        if float(q.get("Day High", 0)) > 0:
-                            df.at[idx, "Day High"] = float(q["Day High"])
-                        df.at[idx, "Volume"] = float(q.get("Volume", 0))
+            refresh_adapter_quotes(df, adapter)
         except Exception:
             pass
     else:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import csv
+import io
 from typing import Any, Dict, List, Optional
 import requests
 import streamlit as st
@@ -14,7 +16,8 @@ class IndMoneyAdapter(BrokerAdapter):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
-        self.base_url = "https://api.indstocks.com"
+        self.base_url = self.config.get("base_url", "https://api.indstocks.com").rstrip("/")
+        self._equity_instruments: Optional[Dict[tuple[str, str], str]] = None
         
         token = ""
         if hasattr(st, "secrets"):
@@ -62,6 +65,42 @@ class IndMoneyAdapter(BrokerAdapter):
             if "symbol" in payload or "security_id" in payload:
                 return [payload]
         return []
+
+    def _get_equity_instrument_map(self) -> Dict[tuple[str, str], str]:
+        """Load the INDstocks equity master used to resolve symbols to SECURITY_ID."""
+        if self._equity_instruments is not None:
+            return self._equity_instruments
+
+        instrument_map: Dict[tuple[str, str], str] = {}
+        if not self.access_token:
+            self._equity_instruments = instrument_map
+            return instrument_map
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/market/instruments",
+                headers=self._headers(),
+                params={"source": "equity"},
+                timeout=self.timeout,
+            )
+            if response.status_code == 200:
+                reader = csv.DictReader(io.StringIO(response.text))
+                for row in reader:
+                    exchange = str(row.get("EXCH", "")).strip().upper()
+                    security_id = str(row.get("SECURITY_ID", "")).strip()
+                    if not exchange or not security_id:
+                        continue
+                    for field in ("TRADING_SYMBOL", "SYMBOL_NAME", "CUSTOM_SYMBOL"):
+                        value = str(row.get(field, "")).strip().upper()
+                        if value:
+                            instrument_map.setdefault(
+                                (exchange, value.split("-")[0]), security_id
+                            )
+        except Exception:
+            instrument_map = {}
+
+        self._equity_instruments = instrument_map
+        return instrument_map
 
     def login(self) -> bool:
         return bool(self.access_token)
@@ -115,14 +154,16 @@ class IndMoneyAdapter(BrokerAdapter):
         with open(watchlist_file, "r", encoding="utf-8") as f:
             tickers = [line.strip().upper() for line in f if line.strip()]
 
+        instrument_map = self._get_equity_instrument_map()
         records = []
         for ticker in tickers:
             sym = ticker.split(":")[0]
             exch = ticker.split(":")[1] if ":" in ticker else "NSE"
+            security_id = instrument_map.get((exch, sym), "")
             records.append(self.normalize_row({
                 "Stock Name": sym,
                 "Exchange": exch,
-                "Token": "",
+                "Token": security_id,
                 "Type": "Watchlist",
                 "Quantity": 0.0,
                 "Average Price": 0.0,
