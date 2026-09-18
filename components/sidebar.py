@@ -83,6 +83,10 @@ def render_sidebar():
                         existing.append(new_ticker)
                         save_watchlist_tickers(existing)
                         backend_updater.LAST_WATCHLIST_MTIME = 0
+                        if st.session_state.get("active_broker") == "indmoney":
+                            fresh_df = backend_updater.sync_portfolio_registry(None)
+                            if fresh_df is not None and not fresh_df.empty:
+                                backend_updater.stream_tick_cycle(fresh_df)
                         st.success(f"Added '{new_ticker}'. Syncing live feed...")
                         time.sleep(0.5)
                         st.rerun()
