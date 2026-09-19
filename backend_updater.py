@@ -6,7 +6,6 @@ import pandas as pd
 import os
 import tempfile
 from datetime import datetime
-import streamlit as st
 
 from brokers.config import get_active_broker_name, get_broker_secrets
 from brokers.manager import get_active_broker_adapter
@@ -20,7 +19,6 @@ def get_csv_for_broker(broker_name: str) -> str:
     return os.path.join(APP_DIR, f"portfolio_{broker_name.lower().strip()}.csv")
 
 def normalize_token(val) -> str:
-    """Guarantee token is a clean integer string without float decimal artifacts (e.g. '3045.0' -> '3045')."""
     if pd.isna(val):
         return ""
     s = str(val).strip()
@@ -57,14 +55,11 @@ AUTH_LOCK = threading.Lock()
 
 def authenticate():
     global smart_connect, JWT_TOKEN, FEED_TOKEN
-
-    # Safety Guard: Never attempt Angel One login if not running as angel_one
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
     if active_broker != "angel_one":
         return None, None
 
     if SmartConnect is None or pyotp is None:
-        print("❌ [ANGEL ONE] SmartConnect or pyotp module not installed.")
         return None, None
 
     cfg = get_broker_secrets("angel_one")
@@ -78,19 +73,15 @@ def authenticate():
 
     with AUTH_LOCK:
         try:
-            print(f"📡 [ANGEL ONE] Logging in client {client_id}...")
             smart_connect = SmartConnect(api_key=api_key)
             totp = pyotp.TOTP(totp_secret).now()
             session = smart_connect.generateSession(client_id, password, totp)
             if not session or not session.get('status'):
-                print(f"❌ [ANGEL ONE] Session generation failed: {session.get('message') if session else 'None'}")
                 return None, None
             FEED_TOKEN = smart_connect.feed_token or session.get('data', {}).get('feedToken')
             JWT_TOKEN = session.get('data', {}).get('jwtToken')
-            print("🟢 Successfully authenticated with Angel One SmartAPI!")
             return JWT_TOKEN, FEED_TOKEN
-        except Exception as e:
-            print(f"❌ [ANGEL ONE] Auth exception: {e}")
+        except Exception:
             return None, None
 
 def refresh_broker_session():
@@ -98,7 +89,6 @@ def refresh_broker_session():
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
     if active_broker != "angel_one":
         return False
-
     new_jwt, new_feed = authenticate()
     if new_jwt and new_feed:
         JWT_TOKEN = new_jwt
@@ -136,7 +126,6 @@ def ensure_scrip_master():
     if SCRIP_LOADED and TOKEN_MAP:
         return
     try:
-        print("Downloading active Scrip Master from Angel One...")
         res = requests.get(SCRIP_MASTER_URL, timeout=25)
         res.raise_for_status()
         scrip_data = res.json()
@@ -165,9 +154,8 @@ def ensure_scrip_master():
         SEGMENT_MAP = segment_map
         BASE_NAME_MAP = base_name_map
         SCRIP_LOADED = True
-        print(f"Scrip Master indexed: {len(token_map)} active instruments.")
-    except Exception as e:
-        print(f"Failed to fetch Scrip Master: {e}")
+    except Exception:
+        pass
 
 # ==========================================
 # WEBSOCKET ENGINE & TICK CACHE
@@ -179,7 +167,6 @@ IS_WS_READY = False
 PENDING_EXCHANGE_GROUPS = {}
 
 def load_persisted_ticks():
-    """Seed LIVE_TICKS with known CMP, PC, Day High, and Volume from disk on app boot."""
     for broker in ("angel_one", "indmoney", "us_stocks"):
         csv_file = get_csv_for_broker(broker)
         if os.path.exists(csv_file) and os.path.getsize(csv_file) > 0:
@@ -187,8 +174,7 @@ def load_persisted_ticks():
                 prev_df = pd.read_csv(csv_file, dtype={'Token': str})
                 for _, row in prev_df.iterrows():
                     tok = normalize_token(row.get('Token', ''))
-                    if not tok:
-                        continue
+                    sym = str(row.get('Stock Name', '')).strip().upper()
                     try:
                         pc = float(row.get('PC', 0) or 0)
                         cmp_val = float(row.get('CMP', 0) or 0)
@@ -197,23 +183,25 @@ def load_persisted_ticks():
                     except (ValueError, TypeError):
                         continue
 
-                    if tok not in LIVE_TICKS:
-                        LIVE_TICKS[tok] = {}
-                    if pc > 0:
-                        LIVE_TICKS[tok]['PC'] = pc
-                    if cmp_val > 0 and 'CMP' not in LIVE_TICKS[tok]:
-                        LIVE_TICKS[tok]['CMP'] = cmp_val
-                    if high > 0 and 'Day High' not in LIVE_TICKS[tok]:
-                        LIVE_TICKS[tok]['Day High'] = high
-                    if vol > 0 and 'Volume' not in LIVE_TICKS[tok]:
-                        LIVE_TICKS[tok]['Volume'] = vol
-            except Exception as e:
-                print(f"Warning seeding persisted ticks from {csv_file}: {e}")
+                    for identifier in (tok, sym):
+                        if not identifier:
+                            continue
+                        if identifier not in LIVE_TICKS:
+                            LIVE_TICKS[identifier] = {}
+                        if pc > 0:
+                            LIVE_TICKS[identifier]['PC'] = pc
+                        if cmp_val > 0:
+                            LIVE_TICKS[identifier]['CMP'] = cmp_val
+                        if high > 0:
+                            LIVE_TICKS[identifier]['Day High'] = high
+                        if vol > 0:
+                            LIVE_TICKS[identifier]['Volume'] = vol
+            except Exception:
+                pass
 
 load_persisted_ticks()
 
 def fetch_angel_market_data(tokens_by_exchange):
-    """Fetch official OHLC & Previous Close from Angel One REST API for missing tokens."""
     global smart_connect
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
     if active_broker != "angel_one":
@@ -241,8 +229,8 @@ def fetch_angel_market_data(tokens_by_exchange):
                             h = float(item.get("high", 0.0) or 0.0)
                             if tok and c > 0:
                                 results[tok] = {"PC": c, "CMP": l, "Day High": h}
-    except Exception as e:
-        print(f"Error fetching market data from Angel One: {e}")
+    except Exception:
+        pass
     return results
 
 def map_exch_to_ws_type(exch):
@@ -254,14 +242,7 @@ def on_data(wsapp, msg):
         if isinstance(msg, dict) and 'token' in msg:
             token = normalize_token(msg.get('token'))
             ltp = float(msg.get('last_traded_price', 0)) / 100.0
-
-            raw_close = (
-                msg.get('closed_price')
-                or msg.get('close_price')
-                or msg.get('close')
-                or msg.get('prev_close')
-                or 0
-            )
+            raw_close = msg.get('closed_price') or msg.get('close_price') or msg.get('close') or msg.get('prev_close') or 0
             close = float(raw_close) / 100.0 if float(raw_close) > 0 else 0.0
             high = float(msg.get('high_price_of_the_day', 0)) / 100.0
             vol = int(msg.get('volume_trade_for_the_day', 0))
@@ -269,14 +250,7 @@ def on_data(wsapp, msg):
             if ltp > 0 and token:
                 prev_record = LIVE_TICKS.get(token, {})
                 prev_pc = float(prev_record.get('PC', 0.0) or 0.0)
-
-                if close > 0:
-                    final_pc = close
-                elif prev_pc > 0:
-                    final_pc = prev_pc
-                else:
-                    final_pc = 0.0
-
+                final_pc = close if close > 0 else (prev_pc if prev_pc > 0 else 0.0)
                 prev_high = float(prev_record.get('Day High', 0.0) or 0.0)
                 final_high = high if high > 0 else (prev_high if prev_high > 0 else ltp)
 
@@ -292,13 +266,11 @@ def on_data(wsapp, msg):
 def on_open(wsapp):
     global IS_WS_READY, SUBSCRIBED_TOKENS
     IS_WS_READY = True
-    print("🟢 Angel One WebSocket Connection Established.")
     if PENDING_EXCHANGE_GROUPS:
         try:
             token_list = [{"exchangeType": k, "tokens": v} for k, v in PENDING_EXCHANGE_GROUPS.items()]
             wsapp.subscribe("ws_feed", 3, token_list)
             SUBSCRIBED_TOKENS = set([tok for grp in PENDING_EXCHANGE_GROUPS.values() for tok in grp])
-            print(f"📡 Subscribed to {len(SUBSCRIBED_TOKENS)} tokens on WebSocket.")
         except Exception:
             pass
 
@@ -313,7 +285,6 @@ def on_close(wsapp):
 def run_websocket():
     global WS_APP, IS_WS_READY, SUBSCRIBED_TOKENS
     retry_delay = 5
-
     while True:
         try:
             active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
@@ -352,7 +323,6 @@ def start_ws_daemon():
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
     if active_broker != "angel_one":
         return
-
     if not any(t.name == "angel_one_ws_thread" for t in threading.enumerate()):
         t = threading.Thread(target=run_websocket, name="angel_one_ws_thread", daemon=True)
         t.start()
@@ -400,14 +370,14 @@ def sync_ws_subscriptions(df):
             pass
 
 # ==========================================
-# PORTFOLIO REGISTRY SYNC
+# PORTFOLIO REGISTRY & HISTORICAL BASELINES
 # ==========================================
 BROKER_CACHE = {}
-INDMONEY_HISTORY_CACHE = {}
-INDMONEY_HISTORY_FETCHED_AT = 0.0
+HISTORICAL_BASELINES_CACHE = {}
+HISTORICAL_FETCHED_AT = 0.0
+LAST_POSITIONS_FETCH_TIME = 0.0
 
 def refresh_adapter_quotes(df, adapter):
-    """Refresh broker quotes using tokens when available and symbols otherwise."""
     if df is None or df.empty:
         return
 
@@ -426,6 +396,9 @@ def refresh_adapter_quotes(df, adapter):
         return
 
     quotes = adapter.fetch_quotes(request_keys)
+    if not quotes:
+        return
+
     token_map = {normalize_token(q.get("Token")): q for q in quotes if q.get("Token")}
     symbol_map = {
         (str(q.get("Exchange", "NSE")).upper(), str(q.get("Stock Name", "")).upper()): q
@@ -435,25 +408,52 @@ def refresh_adapter_quotes(df, adapter):
 
     for idx, row in df.iterrows():
         token = normalize_token(row.get("Token", ""))
-        symbol_key = (
-            str(row.get("Exchange", "NSE")).upper(),
-            str(row.get("Stock Name", "")).upper(),
-        )
+        sym = str(row.get("Stock Name", "")).upper()
+        symbol_key = (str(row.get("Exchange", "NSE")).upper(), sym)
         quote = token_map.get(token) if token else None
         quote = quote or symbol_map.get(symbol_key)
         if not quote:
             continue
-        df.at[idx, "CMP"] = float(quote.get("CMP", 0) or 0)
-        if float(quote.get("PC", 0) or 0) > 0:
-            df.at[idx, "PC"] = float(quote["PC"])
+
+        cmp_val = float(quote.get("CMP", 0) or 0)
+        pc_val = float(quote.get("PC", 0) or 0)
+        day_high_val = float(quote.get("Day High", 0) or 0)
+
+        # Cache live Option A explicit pre-calculated returns
+        optA_1w = float(quote.get("OptionA_1W", 0.0))
+        optA_1m = float(quote.get("OptionA_1M", 0.0))
+
+        if cmp_val > 0:
+            df.at[idx, "CMP"] = cmp_val
+            if token: LIVE_TICKS.setdefault(token, {})['CMP'] = cmp_val
+            if sym: LIVE_TICKS.setdefault(sym, {})['CMP'] = cmp_val
+
+        if pc_val > 0:
+            df.at[idx, "PC"] = pc_val
+            if token: LIVE_TICKS.setdefault(token, {})['PC'] = pc_val
+            if sym: LIVE_TICKS.setdefault(sym, {})['PC'] = pc_val
+
+        final_high = day_high_val if day_high_val > 0 else cmp_val
+        if final_high > 0:
+            df.at[idx, "Day High"] = final_high
+            if token: LIVE_TICKS.setdefault(token, {})['Day High'] = final_high
+            if sym: LIVE_TICKS.setdefault(sym, {})['Day High'] = final_high
+
         if float(quote.get("Day Open", 0) or 0) > 0:
             df.at[idx, "Day Open"] = float(quote["Day Open"])
-        if float(quote.get("Day High", 0) or 0) > 0:
-            df.at[idx, "Day High"] = float(quote["Day High"])
+            
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
 
+        # Apply Option A direct injection
+        if optA_1w != 0.0:
+            df.at[idx, "1W%"] = optA_1w
+            df.at[idx, "OptionA_1W_Used"] = True
+        if optA_1m != 0.0:
+            df.at[idx, "1M%"] = optA_1m
+            df.at[idx, "OptionA_1M_Used"] = True
+
 def refresh_indmoney_history(df, adapter):
-    global INDMONEY_HISTORY_CACHE, INDMONEY_HISTORY_FETCHED_AT
+    global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
     if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
         return
 
@@ -464,33 +464,89 @@ def refresh_indmoney_history(df, adapter):
         return
 
     now = time.time()
-    if now - INDMONEY_HISTORY_FETCHED_AT >= 300 or not all(token in INDMONEY_HISTORY_CACHE for token in tokens):
-        fetched = adapter.fetch_daily_baselines(tokens)
-        if fetched:
-            INDMONEY_HISTORY_CACHE.update(fetched)
-            INDMONEY_HISTORY_FETCHED_AT = now
+    missing = [t for t in tokens if t not in HISTORICAL_BASELINES_CACHE]
+    
+    if (now - HISTORICAL_FETCHED_AT >= 900) or missing:
+        to_fetch = tokens if (now - HISTORICAL_FETCHED_AT >= 900) else missing
+        for t in to_fetch:
+            if t not in HISTORICAL_BASELINES_CACHE:
+                HISTORICAL_BASELINES_CACHE[t] = {}
 
+        fetched = adapter.fetch_daily_baselines(to_fetch)
+        if fetched:
+            HISTORICAL_BASELINES_CACHE.update(fetched)
+            
+        HISTORICAL_FETCHED_AT = time.time()
+
+    # Exact Implementation of Model A (Close_t - Close_{t-N})
     for idx, row in watchlist.iterrows():
         token = normalize_token(row.get("Token", ""))
-        baselines = INDMONEY_HISTORY_CACHE.get(token, {})
+        baselines = HISTORICAL_BASELINES_CACHE.get(token, {})
         current = float(row.get("CMP", 0) or 0)
-        for name, baseline in baselines.items():
-            df.at[idx, name] = ((current - baseline) / baseline) * 100 if baseline > 0 else 0.0
-        day_open = float(row.get("Day Open", 0) or 0)
-        if day_open > 0 and current > 0:
-            df.at[idx, "1W%"] = ((current - day_open) / day_open) * 100
+        pc = float(row.get("PC", 0) or 0)
+
+        # 1D% strictly mirrors live PC
+        if pc > 0 and current > 0:
+            df.at[idx, "1D%"] = ((current - pc) / pc) * 100
+        elif baselines.get("1D%", 0) > 0 and current > 0:
+            b1 = baselines["1D%"]
+            df.at[idx, "1D%"] = ((current - b1) / b1) * 100
+
+        # Execute exactly: Return_ND = (Close_t - Close_t-N) / Close_t-N * 100
+        for col_name in ("2D%", "3D%", "4D%", "1W%", "1M%"):
+            # Check if Option A was already mapped for 1W/1M from quotes feed
+            if col_name == "1W%" and row.get("OptionA_1W_Used", False):
+                continue
+            if col_name == "1M%" and row.get("OptionA_1M_Used", False):
+                continue
+
+            b_val = baselines.get(col_name, 0.0)
+            if b_val > 0 and current > 0:
+                df.at[idx, col_name] = ((current - b_val) / b_val) * 100
+            else:
+                df.at[idx, col_name] = 0.0
 
 def sync_portfolio_registry(current_df=None):
-    global LAST_WATCHLIST_MTIME, BROKER_CACHE
+    global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME, HISTORICAL_FETCHED_AT
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
 
-    # --- INDMONEY / US STOCKS PATH ---
     if active_broker in ("indmoney", "us_stocks"):
+        mtime = 0
+        try:
+            mtime = os.stat(WATCHLIST_FILE).st_mtime_ns
+        except FileNotFoundError:
+            pass
+
+        now = time.time()
+        cached_df = BROKER_CACHE.get(active_broker)
+
+        if (
+            cached_df is not None 
+            and not cached_df.empty 
+            and mtime == LAST_WATCHLIST_MTIME 
+            and (now - LAST_POSITIONS_FETCH_TIME < 60)
+        ):
+            return cached_df
+
+        LAST_WATCHLIST_MTIME = mtime
+        LAST_POSITIONS_FETCH_TIME = now
         try:
             adapter = get_active_broker_adapter()
             pos = adapter.fetch_positions()
             wl = adapter.fetch_watchlist()
             combined = pos + wl
+
+            for item in combined:
+                tok = normalize_token(item.get("Token", ""))
+                sym = str(item.get("Stock Name", "")).upper()
+                cached_tick = LIVE_TICKS.get(tok) or LIVE_TICKS.get(sym) or {}
+                if item.get("CMP", 0) <= 0 and cached_tick.get("CMP", 0) > 0:
+                    item["CMP"] = cached_tick["CMP"]
+                if item.get("PC", 0) <= 0 and cached_tick.get("PC", 0) > 0:
+                    item["PC"] = cached_tick["PC"]
+                if item.get("Day High", 0) <= 0 and cached_tick.get("Day High", 0) > 0:
+                    item["Day High"] = cached_tick["Day High"]
+
             if combined:
                 df = pd.DataFrame(combined)
                 refresh_adapter_quotes(df, adapter)
@@ -502,12 +558,10 @@ def sync_portfolio_registry(current_df=None):
             print(f"[{active_broker.upper()}] sync error: {e}")
         return BROKER_CACHE.get(active_broker, pd.DataFrame())
 
-    # --- ANGEL ONE PATH (Only executed if angel_one is explicitly active) ---
     if active_broker != "angel_one":
         return pd.DataFrame()
 
     ensure_scrip_master()
-
     mtime = 0
     try:
         mtime = os.stat(WATCHLIST_FILE).st_mtime_ns
@@ -525,7 +579,6 @@ def sync_portfolio_registry(current_df=None):
 
     LAST_WATCHLIST_MTIME = mtime
     combined = []
-    seen_holdings = set()
 
     try:
         if smart_connect is None:
@@ -544,7 +597,6 @@ def sync_portfolio_registry(current_df=None):
                 unique_key = f"{sym}:{exch}"
                 tok = normalize_token(item.get('symboltoken', '')) or TOKEN_MAP.get(unique_key, "")
                 avg_price = float(item.get('averageprice', 0.0) or 0.0)
-                
                 raw_close = item.get('close') or item.get('closeprice') or item.get('prevClose') or item.get('previousclose') or 0.0
                 close_price = float(raw_close or 0.0)
                 ltp_price = float(item.get('ltp') or item.get('ltpPrice') or 0.0)
@@ -556,7 +608,6 @@ def sync_portfolio_registry(current_df=None):
                 pc_val = close_price
 
                 if sym and tok:
-                    seen_holdings.add(unique_key)
                     combined.append({
                         'Stock Name': sym,
                         'Exchange': exch,
@@ -572,9 +623,8 @@ def sync_portfolio_registry(current_df=None):
                         'Buy Price': avg_price,
                         'Broker': 'angel_one'
                     })
-            print(f"📊 [ANGEL ONE] Successfully loaded {len(combined)} holdings.")
-    except Exception as e:
-        print(f"❌ [ANGEL ONE] Holdings fetch exception: {e}")
+    except Exception:
+        pass
 
     seen_watchlist = set()
     if os.path.exists(WATCHLIST_FILE):
@@ -608,7 +658,6 @@ def sync_portfolio_registry(current_df=None):
                 })
                 seen_watchlist.add(unique_key)
 
-    # Fetch missing PC for any token via REST OHLC
     missing_tokens_by_exch = {}
     for item in combined:
         if item.get('PC', 0.0) <= 0:
@@ -625,15 +674,13 @@ def sync_portfolio_registry(current_df=None):
                 q = fetched_quotes[tok]
                 if q.get('PC', 0) > 0:
                     item['PC'] = q['PC']
-                    if tok not in LIVE_TICKS:
-                        LIVE_TICKS[tok] = {}
-                    LIVE_TICKS[tok]['PC'] = q['PC']
+                    LIVE_TICKS.setdefault(tok, {})['PC'] = q['PC']
                 if q.get('CMP', 0) > 0 and item.get('CMP', 0) <= 0:
                     item['CMP'] = q['CMP']
-                    LIVE_TICKS[tok]['CMP'] = q['CMP']
+                    LIVE_TICKS.setdefault(tok, {})['CMP'] = q['CMP']
                 if q.get('Day High', 0) > 0 and item.get('Day High', 0) <= 0:
                     item['Day High'] = q['Day High']
-                    LIVE_TICKS[tok]['Day High'] = q['Day High']
+                    LIVE_TICKS.setdefault(tok, {})['Day High'] = q['Day High']
 
     if combined:
         start_ws_daemon()
@@ -685,10 +732,34 @@ def stream_tick_cycle(df):
         tick_vol = t_series.map(lambda t: _extract_live(t, 'Volume'))
         df['Volume'] = tick_vol.combine_first(pd.to_numeric(df.get('Volume'), errors='coerce')).fillna(0)
 
-    # Core Vectorized Calculations
+    for idx, row in df.iterrows():
+        c_val = float(row.get("CMP", 0) or 0)
+        p_val = float(row.get("PC", 0) or 0)
+        h_val = float(row.get("Day High", 0) or 0)
+
+        tok = normalize_token(row.get("Token", ""))
+        sym = str(row.get("Stock Name", "")).upper()
+
+        if c_val <= 0:
+            fallback = LIVE_TICKS.get(tok, {}).get("CMP") or LIVE_TICKS.get(sym, {}).get("CMP", 0.0)
+            if fallback > 0:
+                df.at[idx, "CMP"] = fallback
+                c_val = fallback
+
+        if p_val <= 0:
+            fallback_pc = LIVE_TICKS.get(tok, {}).get("PC") or LIVE_TICKS.get(sym, {}).get("PC", 0.0)
+            if fallback_pc > 0:
+                df.at[idx, "PC"] = fallback_pc
+                p_val = fallback_pc
+
+        if h_val <= 0:
+            fallback_h = LIVE_TICKS.get(tok, {}).get("Day High") or LIVE_TICKS.get(sym, {}).get("Day High", c_val)
+            df.at[idx, "Day High"] = fallback_h if fallback_h > 0 else c_val
+
     pc_series = pd.to_numeric(df['PC'], errors='coerce').fillna(0.0)
     cmp_series = pd.to_numeric(df['CMP'], errors='coerce').fillna(0.0)
-    high_series = pd.to_numeric(df['Day High'], errors='coerce').fillna(cmp_series)
+    raw_high = pd.to_numeric(df['Day High'], errors='coerce').fillna(cmp_series)
+    high_series = np.maximum(raw_high, cmp_series)
     qty_series = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0.0)
     avg_series = pd.to_numeric(df['Average Price'], errors='coerce').fillna(0.0)
 
@@ -698,8 +769,9 @@ def stream_tick_cycle(df):
     df['Quantity'] = qty_series
     df['Average Price'] = avg_series
 
-    # Calculate 1D %, 1D High %, and Sell Alert
+    # Vectorized core formulas
     df['D%'] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
+    df['1D%'] = df['D%']
     df['DH%'] = np.where(pc_series > 0, ((high_series - pc_series) / pc_series) * 100, 0.0)
     df['SAlert'] = np.where(cmp_series > 0, ((cmp_series - high_series) / cmp_series) * 100, 0.0)
 
@@ -709,7 +781,6 @@ def stream_tick_cycle(df):
     invested_series = df['Total Invested']
     df['ROI (%)'] = np.where(invested_series > 0, (df['Net P&L'] / invested_series) * 100, 0.0)
 
-    # Save to broker-specific CSV
     target_csv = get_csv_for_broker(active_broker)
     if not df.empty:
         temp_path = None

@@ -4,9 +4,10 @@ import os
 import csv
 import io
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 import requests
+import pandas as pd
 import streamlit as st
 from .base import BrokerAdapter
 
@@ -54,7 +55,11 @@ class IndMoneyAdapter(BrokerAdapter):
             )
             if resp.status_code == 200:
                 return resp.json()
-            return None
+            elif resp.status_code == 401:
+                print("❌ [INDMONEY ERROR] 401 Unauthorized: Access token in secrets.toml has EXPIRED.")
+                return None
+            else:
+                return None
         except Exception:
             return None
 
@@ -71,13 +76,11 @@ class IndMoneyAdapter(BrokerAdapter):
         return []
 
     def _get_equity_instrument_map(self) -> Dict[tuple[str, str], str]:
-        """Load the INDstocks equity master used to resolve symbols to SECURITY_ID."""
-        if self._equity_instruments is not None:
+        if self._equity_instruments is not None and len(self._equity_instruments) > 0:
             return self._equity_instruments
 
         instrument_map: Dict[tuple[str, str], str] = {}
         if not self.access_token:
-            self._equity_instruments = instrument_map
             return instrument_map
 
         try:
@@ -94,9 +97,7 @@ class IndMoneyAdapter(BrokerAdapter):
                     security_id = str(row.get("SECURITY_ID", "")).strip()
                     if not exchange or not security_id:
                         continue
-                    display_name = str(
-                        row.get("SYMBOL_NAME") or row.get("CUSTOM_SYMBOL") or ""
-                    ).strip()
+                    display_name = str(row.get("SYMBOL_NAME") or row.get("CUSTOM_SYMBOL") or "").strip()
                     trading_symbol = str(row.get("TRADING_SYMBOL", "")).strip().upper()
                     instrument_key = (exchange, security_id)
                     if trading_symbol:
@@ -108,14 +109,13 @@ class IndMoneyAdapter(BrokerAdapter):
                             instrument_map.setdefault(key, security_id)
                             if display_name:
                                 self._equity_instrument_names.setdefault(key, display_name)
+                self._equity_instruments = instrument_map
         except Exception:
-            instrument_map = {}
+            pass
 
-        self._equity_instruments = instrument_map
         return instrument_map
 
     def get_equity_instrument_catalog(self) -> List[Dict[str, str]]:
-        """Return searchable INDmoney equity symbols with display names."""
         instrument_map = self._get_equity_instrument_map()
         catalog = {}
         for (exchange, symbol), token in instrument_map.items():
@@ -136,7 +136,6 @@ class IndMoneyAdapter(BrokerAdapter):
         return bool(self.access_token)
 
     def fetch_positions(self) -> List[Dict[str, Any]]:
-        """Queries settled Demat holdings + open CNC equity positions."""
         records = []
         seen_syms = set()
 
@@ -236,6 +235,10 @@ class IndMoneyAdapter(BrokerAdapter):
                 open_val = float(val.get("day_open") or 0.0)
                 high_val = float(val.get("day_high") or val.get("high") or cmp_val)
 
+                # OPTION A Fallback: Parse broker pre-calculated returns if available in the payload
+                broker_1w = float(val.get("1w_change_pct") or val.get("return_1w") or val.get("1w_ret") or 0.0)
+                broker_1m = float(val.get("1m_change_pct") or val.get("return_1m") or val.get("1m_ret") or 0.0)
+
                 records.append(self.normalize_row({
                     "Stock Name": str(val.get("symbol", "")).upper(),
                     "Exchange": "NSE",
@@ -245,12 +248,14 @@ class IndMoneyAdapter(BrokerAdapter):
                     "Day Open": open_val,
                     "Day High": high_val,
                     "Volume": float(val.get("volume") or 0),
-                    "Broker": "indmoney"
+                    "Broker": "indmoney",
+                    "OptionA_1W": broker_1w,
+                    "OptionA_1M": broker_1m
                 }))
         return records
 
     def fetch_daily_baselines(self, tokens: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
-        """Return prior daily closes used for multi-day watchlist performance."""
+        """Implementation of Model A: Strict N-Day Lookback (Close_t-N)"""
         if not tokens:
             return {}
 
@@ -261,8 +266,15 @@ class IndMoneyAdapter(BrokerAdapter):
                 codes.append(code if "_" in code else f"NSE_{code}")
 
         baselines: Dict[str, Dict[str, float]] = {}
+        for token in tokens:
+            raw_t = str(token).replace("NSE_", "").strip()
+            baselines[raw_t] = {}
+
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (45 * 24 * 60 * 60 * 1000)
+        start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)  # 60 calendar days
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        today_ist = datetime.now(ist_tz).date()
+
         for offset in range(0, len(codes), 5):
             batch = codes[offset:offset + 5]
             payload = self._request(
@@ -274,41 +286,62 @@ class IndMoneyAdapter(BrokerAdapter):
                     "end_time": now_ms,
                 },
             )
+            time.sleep(0.08)
+
             if not isinstance(payload, dict):
                 continue
 
             data_block = payload.get("data", {})
             if not isinstance(data_block, dict):
                 continue
+
             for scrip_key, instrument in data_block.items():
                 candles = instrument.get("candles") if isinstance(instrument, dict) else None
-                if not isinstance(candles, list):
+                if not isinstance(candles, list) or not candles:
                     continue
+
                 candles_by_date = []
                 for candle in candles:
                     try:
                         close = float(candle.get("c", 0) or 0)
-                        candle_date = datetime.fromtimestamp(
-                            int(candle.get("ts", 0)), timezone.utc
-                        ).date()
-                    except (AttributeError, TypeError, ValueError):
-                        close = 0.0
-                        candle_date = None
-                    if close > 0 and candle_date is not None:
-                        candles_by_date.append((candle_date, close))
+                        ts = float(candle.get("ts", 0) or 0)
+                        if ts <= 0 or close <= 0:
+                            continue
+                        ts_sec = ts / 1000.0 if ts > 1e11 else ts
+                        c_date = datetime.fromtimestamp(ts_sec, ist_tz).date()
+                        candles_by_date.append((c_date, close))
+                    except Exception:
+                        continue
 
-                if len(candles_by_date) < 2:
+                if not candles_by_date:
                     continue
+
+                candles_by_date.sort(key=lambda x: x[0])
+                
+                # Filter strictly for completed sessions
+                closed_candles = [c for c in candles_by_date if c[0] < today_ist]
+                if not closed_candles:
+                    closed_candles = candles_by_date
+                
+                n = len(closed_candles)
+                
+                # Model A Exact Indices: Close_{t-N}
+                def close_t_minus(days_back: int) -> float:
+                    idx = n - days_back
+                    if idx < 0: idx = 0
+                    return closed_candles[idx][1]
+
                 raw_token = scrip_key.split("_")[-1]
-                period_offsets = {
-                    "1D%": 1,
-                    "2D%": 2,
-                    "3D%": 3,
-                    "4D%": 4,
-                    "1M%": 26,
+                
+                entry = {
+                    "1D%": close_t_minus(1), # Close_{t-1}
+                    "2D%": close_t_minus(2), # Close_{t-2}
+                    "3D%": close_t_minus(3), # Close_{t-3}
+                    "4D%": close_t_minus(4), # Close_{t-4}
+                    "1W%": close_t_minus(5), # Close_{t-5}
+                    "1M%": close_t_minus(21), # Close_{t-21}
                 }
-                baselines[raw_token] = {}
-                for name, days in period_offsets.items():
-                    baseline_index = max(0, len(candles_by_date) - days - 1)
-                    baselines[raw_token][name] = candles_by_date[baseline_index][1]
+                baselines[raw_token] = entry
+                baselines[scrip_key] = entry
+
         return baselines

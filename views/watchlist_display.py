@@ -40,7 +40,6 @@ def build_watchlist_display_frame(df):
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
 
-    # Use incoming broker column or default to Angel One
     broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
 
     base_frame = pd.DataFrame({
@@ -67,7 +66,7 @@ def build_watchlist_display_frame(df):
         "Broker": broker_series,
     })
 
-    # Override CMP with Sell Price for closed mock positions
+    # Override CMP with Sell Price for closed positions
     for idx in rows.index:
         q = quantity.loc[idx]
         sp = sell_price.loc[idx]
@@ -108,10 +107,11 @@ def style_watchlist_table(df):
 
     def highlight_cells(row):
         styles = ['' for _ in row]
+        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%", "1W%", "1M%"}
         for idx, col_name in enumerate(row.index):
             val = row[col_name]
             
-            if col_name in ["D%", "% Profit"]:
+            if col_name in color_target_cols:
                 try:
                     num = float(val)
                     if num > 0: styles[idx] = "background-color: #1f9d55; color: white;"

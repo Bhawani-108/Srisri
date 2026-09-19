@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 from brokers.config import get_active_broker_name
@@ -51,20 +52,24 @@ def ensure_backend_data_loaded():
         print(f"Preflight sync warning: {e}")
 
 
-def get_clean_data():
-    target_csv = get_broker_csv()
-    if not os.path.exists(target_csv):
-        return pd.DataFrame()
-    try:
-        if os.path.getsize(target_csv) == 0:
-            return pd.DataFrame()
-        # Force Token column to be parsed as string to prevent float conversions (e.g., 3045 -> 3045.0)
-        df = pd.read_csv(target_csv, dtype={"Token": str})
-    except Exception:
-        return pd.DataFrame()
+_LAST_CLEAN_DF = pd.DataFrame()
 
-    if df.empty:
-        return pd.DataFrame()
+def get_clean_data():
+    global _LAST_CLEAN_DF
+    target_csv = get_broker_csv()
+    if not os.path.exists(target_csv) or os.path.getsize(target_csv) == 0:
+        return _LAST_CLEAN_DF.copy()
+
+    df = pd.DataFrame()
+    for _ in range(3):
+        try:
+            df = pd.read_csv(target_csv, dtype={"Token": str})
+            break
+        except Exception:
+            time.sleep(0.015)
+
+    if df.empty or "Type" not in df.columns:
+        return _LAST_CLEAN_DF.copy()
 
     if "Token" in df.columns:
         df["Token"] = df["Token"].apply(clean_token)
@@ -79,18 +84,13 @@ def get_clean_data():
         df["CMP"] = pd.to_numeric(df["CMP"], errors="coerce").fillna(0.0)
         df["PC"] = pd.to_numeric(df.get("PC", 0), errors="coerce").fillna(0.0)
 
-        if "Sell Price" not in df.columns:
-            df["Sell Price"] = pd.NA
-        if "Side" not in df.columns:
-            df["Side"] = "LONG"
-        if "Status" not in df.columns:
-            df["Status"] = "OPEN"
-        if "PD Volume" not in df.columns:
-            df["PD Volume"] = pd.NA
+        if "Sell Price" not in df.columns: df["Sell Price"] = pd.NA
+        if "Side" not in df.columns: df["Side"] = "LONG"
+        if "Status" not in df.columns: df["Status"] = "OPEN"
+        if "PD Volume" not in df.columns: df["PD Volume"] = pd.NA
 
         df["Total Invested"] = df["Quantity"] * df["Effective_Buy_Price"]
 
-        # Vectorized Net P&L and Current Value calculation for Watchlist vs Holdings
         is_wl = df["Type"] == "Watchlist"
         df["Current Value"] = df["Total Invested"]
         df["Net P&L"] = 0.0
@@ -114,9 +114,11 @@ def get_clean_data():
         df.loc[is_hold, "Current Value"] = df.loc[is_hold, "Quantity"] * df.loc[is_hold, "CMP"]
         df.loc[is_hold, "Net P&L"] = df.loc[is_hold, "Current Value"] - df.loc[is_hold, "Total Invested"]
 
-        # Recalculate 1D % using clean Previous Close
         pc_series = df["PC"]
         cmp_series = df["CMP"]
         df["D%"] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
+        if "1D%" not in df.columns or df["1D%"].isna().all():
+            df["1D%"] = df["D%"]
 
+    _LAST_CLEAN_DF = df.copy()
     return df
