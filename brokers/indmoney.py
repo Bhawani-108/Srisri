@@ -235,10 +235,6 @@ class IndMoneyAdapter(BrokerAdapter):
                 open_val = float(val.get("day_open") or 0.0)
                 high_val = float(val.get("day_high") or val.get("high") or cmp_val)
 
-                # OPTION A Fallback: Parse broker pre-calculated returns if available in the payload
-                broker_1w = float(val.get("1w_change_pct") or val.get("return_1w") or val.get("1w_ret") or 0.0)
-                broker_1m = float(val.get("1m_change_pct") or val.get("return_1m") or val.get("1m_ret") or 0.0)
-
                 records.append(self.normalize_row({
                     "Stock Name": str(val.get("symbol", "")).upper(),
                     "Exchange": "NSE",
@@ -248,14 +244,12 @@ class IndMoneyAdapter(BrokerAdapter):
                     "Day Open": open_val,
                     "Day High": high_val,
                     "Volume": float(val.get("volume") or 0),
-                    "Broker": "indmoney",
-                    "OptionA_1W": broker_1w,
-                    "OptionA_1M": broker_1m
+                    "Broker": "indmoney"
                 }))
         return records
 
     def fetch_daily_baselines(self, tokens: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
-        """Implementation of Model A: Strict N-Day Lookback (Close_t-N)"""
+        """Strict Model A Close_t-N baseline extraction counting backward from the latest completed session."""
         if not tokens:
             return {}
 
@@ -271,7 +265,7 @@ class IndMoneyAdapter(BrokerAdapter):
             baselines[raw_t] = {}
 
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)  # 60 calendar days
+        start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)
         ist_tz = timezone(timedelta(hours=5, minutes=30))
         today_ist = datetime.now(ist_tz).date()
 
@@ -325,21 +319,28 @@ class IndMoneyAdapter(BrokerAdapter):
                 
                 n = len(closed_candles)
                 
-                # Model A Exact Indices: Close_{t-N}
-                def close_t_minus(days_back: int) -> float:
-                    idx = n - days_back
-                    if idx < 0: idx = 0
-                    return closed_candles[idx][1]
+                # Strictly count backwards from the end of completed candles array:
+                # closed_candles[-1] = CMP session (Friday close)
+                # closed_candles[-2] = T-1 (Thursday close / 1D)
+                # closed_candles[-3] = T-2 (Wednesday close / 2D)
+                # closed_candles[-4] = T-3 (Tuesday close / 3D)
+                # closed_candles[-5] = T-4 (Monday/Prior close / 4D)
+                # closed_candles[-6] = T-5 (1W)
+                # closed_candles[-22] = T-21 (1M)
+                def get_close_at(index_from_end: int) -> float:
+                    pos = n - index_from_end
+                    if pos < 0: pos = 0
+                    return closed_candles[pos][1]
 
                 raw_token = scrip_key.split("_")[-1]
                 
                 entry = {
-                    "1D%": close_t_minus(1), # Close_{t-1}
-                    "2D%": close_t_minus(2), # Close_{t-2}
-                    "3D%": close_t_minus(3), # Close_{t-3}
-                    "4D%": close_t_minus(4), # Close_{t-4}
-                    "1W%": close_t_minus(5), # Close_{t-5}
-                    "1M%": close_t_minus(21), # Close_{t-21}
+                    "1D_base": get_close_at(2),   # T-1
+                    "2D_base": get_close_at(3),   # T-2
+                    "3D_base": get_close_at(4),   # T-3
+                    "4D_base": get_close_at(5),   # T-4
+                    "1W_base": get_close_at(6),   # T-5 (1 Week)
+                    "1M_base": get_close_at(22),  # T-21 (1 Month)
                 }
                 baselines[raw_token] = entry
                 baselines[scrip_key] = entry

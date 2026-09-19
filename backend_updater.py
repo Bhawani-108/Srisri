@@ -419,10 +419,6 @@ def refresh_adapter_quotes(df, adapter):
         pc_val = float(quote.get("PC", 0) or 0)
         day_high_val = float(quote.get("Day High", 0) or 0)
 
-        # Cache live Option A explicit pre-calculated returns
-        optA_1w = float(quote.get("OptionA_1W", 0.0))
-        optA_1m = float(quote.get("OptionA_1M", 0.0))
-
         if cmp_val > 0:
             df.at[idx, "CMP"] = cmp_val
             if token: LIVE_TICKS.setdefault(token, {})['CMP'] = cmp_val
@@ -441,18 +437,10 @@ def refresh_adapter_quotes(df, adapter):
 
         if float(quote.get("Day Open", 0) or 0) > 0:
             df.at[idx, "Day Open"] = float(quote["Day Open"])
-            
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
 
-        # Apply Option A direct injection
-        if optA_1w != 0.0:
-            df.at[idx, "1W%"] = optA_1w
-            df.at[idx, "OptionA_1W_Used"] = True
-        if optA_1m != 0.0:
-            df.at[idx, "1M%"] = optA_1m
-            df.at[idx, "OptionA_1M_Used"] = True
-
 def refresh_indmoney_history(df, adapter):
+    """Fetches baseline PRICES in the background once every 15 minutes."""
     global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
     if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
         return
@@ -478,36 +466,44 @@ def refresh_indmoney_history(df, adapter):
             
         HISTORICAL_FETCHED_AT = time.time()
 
-    # Exact Implementation of Model A (Close_t - Close_{t-N})
-    for idx, row in watchlist.iterrows():
-        token = normalize_token(row.get("Token", ""))
-        baselines = HISTORICAL_BASELINES_CACHE.get(token, {})
-        current = float(row.get("CMP", 0) or 0)
-        pc = float(row.get("PC", 0) or 0)
+def apply_historical_baselines_to_frame(df):
+    """Calculates all percentages strictly in memory against LIVE CMP."""
+    if df is None or df.empty or 'Type' not in df.columns:
+        return
+
+    watchlist_mask = df.get("Type", "") == "Watchlist"
+    for idx in df[watchlist_mask].index:
+        token = normalize_token(df.loc[idx, "Token"])
+        sym = str(df.loc[idx, "Stock Name"]).strip().upper()
+        
+        baselines = HISTORICAL_BASELINES_CACHE.get(token) or HISTORICAL_BASELINES_CACHE.get(sym) or {}
+        current = float(df.loc[idx, "CMP"] or 0)
+        pc = float(df.loc[idx, "PC"] or 0)
 
         # 1D% strictly mirrors live PC
         if pc > 0 and current > 0:
             df.at[idx, "1D%"] = ((current - pc) / pc) * 100
-        elif baselines.get("1D%", 0) > 0 and current > 0:
-            b1 = baselines["1D%"]
-            df.at[idx, "1D%"] = ((current - b1) / b1) * 100
+        else:
+            b1 = baselines.get("1D_base", 0.0)
+            if b1 > 0 and current > 0:
+                df.at[idx, "1D%"] = ((current - b1) / b1) * 100
 
-        # Execute exactly: Return_ND = (Close_t - Close_t-N) / Close_t-N * 100
-        for col_name in ("2D%", "3D%", "4D%", "1W%", "1M%"):
-            # Check if Option A was already mapped for 1W/1M from quotes feed
-            if col_name == "1W%" and row.get("OptionA_1W_Used", False):
-                continue
-            if col_name == "1M%" and row.get("OptionA_1M_Used", False):
-                continue
-
-            b_val = baselines.get(col_name, 0.0)
+        # Dynamic Recalculation for Multi-Day against Live CMP
+        def calc_ret(col_name, base_key):
+            b_val = baselines.get(base_key, 0.0)
             if b_val > 0 and current > 0:
                 df.at[idx, col_name] = ((current - b_val) / b_val) * 100
-            else:
+            elif col_name not in df.columns or pd.isna(df.loc[idx, col_name]):
                 df.at[idx, col_name] = 0.0
 
+        calc_ret("2D%", "2D_base")
+        calc_ret("3D%", "3D_base")
+        calc_ret("4D%", "4D_base")
+        calc_ret("1W%", "1W_base")
+        calc_ret("1M%", "1M_base")
+
 def sync_portfolio_registry(current_df=None):
-    global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME, HISTORICAL_FETCHED_AT
+    global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
 
     if active_broker in ("indmoney", "us_stocks"):
@@ -552,6 +548,7 @@ def sync_portfolio_registry(current_df=None):
                 refresh_adapter_quotes(df, adapter)
                 if active_broker == "indmoney":
                     refresh_indmoney_history(df, adapter)
+                apply_historical_baselines_to_frame(df)
                 BROKER_CACHE[active_broker] = df
                 return df
         except Exception as e:
@@ -685,6 +682,7 @@ def sync_portfolio_registry(current_df=None):
     if combined:
         start_ws_daemon()
         df = pd.DataFrame(combined)
+        apply_historical_baselines_to_frame(df)
         BROKER_CACHE["angel_one"] = df
         return df
 
@@ -700,8 +698,6 @@ def stream_tick_cycle(df):
         try:
             adapter = get_active_broker_adapter()
             refresh_adapter_quotes(df, adapter)
-            if active_broker == "indmoney":
-                refresh_indmoney_history(df, adapter)
         except Exception:
             pass
     else:
@@ -731,6 +727,9 @@ def stream_tick_cycle(df):
 
         tick_vol = t_series.map(lambda t: _extract_live(t, 'Volume'))
         df['Volume'] = tick_vol.combine_first(pd.to_numeric(df.get('Volume'), errors='coerce')).fillna(0)
+
+    # DYNAMIC CALCULATION: Recalculate percentages dynamically against LIVE CMP every second
+    apply_historical_baselines_to_frame(df)
 
     for idx, row in df.iterrows():
         c_val = float(row.get("CMP", 0) or 0)
@@ -771,7 +770,6 @@ def stream_tick_cycle(df):
 
     # Vectorized core formulas
     df['D%'] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
-    df['1D%'] = df['D%']
     df['DH%'] = np.where(pc_series > 0, ((high_series - pc_series) / pc_series) * 100, 0.0)
     df['SAlert'] = np.where(cmp_series > 0, ((cmp_series - high_series) / cmp_series) * 100, 0.0)
 
