@@ -108,10 +108,10 @@ def style_watchlist_table(df):
 
     def highlight_cells(row):
         styles = ['' for _ in row]
-        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%"}
+        color_target_cols = {"D%", "% Profit"}
         for idx, col_name in enumerate(row.index):
             val = row[col_name]
-            
+
             if col_name in color_target_cols:
                 try:
                     num = float(val)
@@ -119,14 +119,14 @@ def style_watchlist_table(df):
                     elif num < 0: styles[idx] = "background-color: #d64545; color: white;"
                     else: styles[idx] = "background-color: #e5e7eb; color: #111827;"
                 except (ValueError, TypeError): pass
-            
+
             elif col_name == "SAlert":
                 try:
                     num = float(val)
                     if num < -5:
                         styles[idx] = "background-color: #ca8a04; color: white;"
                 except (ValueError, TypeError): pass
-                
+
         return styles
 
     return styler.apply(highlight_cells, axis=1)
