@@ -292,6 +292,7 @@ class IndMoneyAdapter(BrokerAdapter):
         start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)
         ist_tz = timezone(timedelta(hours=5, minutes=30))
         today_ist = datetime.now(ist_tz).date()
+        current_month_start = today_ist.replace(day=1)
 
         for offset in range(0, len(codes), 5):
             batch = codes[offset:offset + 5]
@@ -369,6 +370,11 @@ class IndMoneyAdapter(BrokerAdapter):
                 closed_candles = [c for c in candles_by_date if c[0] < today_ist]
                 if not closed_candles:
                     closed_candles = candles_by_date
+
+                previous_month_candles = [
+                    c for c in closed_candles if c[0] < current_month_start
+                ]
+                pmc = previous_month_candles[-1][1] if previous_month_candles else 0.0
                 
                 n = len(closed_candles)
                 if n >= 6:
@@ -392,6 +398,7 @@ class IndMoneyAdapter(BrokerAdapter):
                     "2D%": pct_2d,
                     "3D%": pct_3d,
                     "4D%": pct_4d,
+                    "PMC": pmc,
                 }
                 
                 baselines[raw_token] = entry

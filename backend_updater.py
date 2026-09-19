@@ -440,18 +440,14 @@ def refresh_adapter_quotes(df, adapter):
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
 
 def refresh_indmoney_history(df, adapter):
-    """Fetches baseline historical percentages in the background once every 15 minutes."""
+    """Fetches daily baselines and previous-month closes every 15 minutes."""
     global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
     if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
         return
 
-    watchlist = df[df.get("Type", "") == "Watchlist"]
-    if watchlist.empty:
-        return
-
-    # Collect both tokens and stock symbols as fallback keys
+    # Collect both tokens and stock symbols as fallback keys for every paper row.
     identifiers = []
-    for _, row in watchlist.iterrows():
+    for _, row in df.iterrows():
         tok = normalize_token(row.get("Token", ""))
         sym = str(row.get("Stock Name", "")).strip().upper()
         if tok:
@@ -479,12 +475,11 @@ def refresh_indmoney_history(df, adapter):
         HISTORICAL_FETCHED_AT = time.time()
 
 def apply_historical_baselines_to_frame(df):
-    """Assigns precalculated day-over-day historical close percentages to 1D%, 2D%, 3D%, 4D%."""
+    """Assigns cached historical percentages and previous-month closes to rows."""
     if df is None or df.empty or 'Type' not in df.columns:
         return
 
-    watchlist_mask = df.get("Type", "") == "Watchlist"
-    for idx in df[watchlist_mask].index:
+    for idx in df.index:
         token = normalize_token(df.loc[idx, "Token"])
         sym = str(df.loc[idx, "Stock Name"]).strip().upper()
         
@@ -494,6 +489,7 @@ def apply_historical_baselines_to_frame(df):
         df.at[idx, "2D%"] = baselines.get("2D%", 0.0)
         df.at[idx, "3D%"] = baselines.get("3D%", 0.0)
         df.at[idx, "4D%"] = baselines.get("4D%", 0.0)
+        df.at[idx, "PMC"] = baselines.get("PMC", 0.0)
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME

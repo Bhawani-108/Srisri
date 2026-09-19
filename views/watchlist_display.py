@@ -39,6 +39,7 @@ def build_watchlist_display_frame(df):
     }
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
+    pmc = _safe_numeric(rows.get("PMC", pd.NA), index=rows.index)
 
     broker_series = rows.get("Broker", pd.Series(["Angel One"] * len(rows), index=rows.index)).fillna("Angel One")
 
@@ -59,7 +60,7 @@ def build_watchlist_display_frame(df):
         **period_pcts,
         "SAlert": s_alert,
         "placeholder": pd.Series([pd.NA] * len(rows), index=rows.index),
-        "PMC": pd.Series([pd.NA] * len(rows), index=rows.index),
+        "PMC": pmc,
         "M %": pd.Series([pd.NA] * len(rows), index=rows.index),
         "Volume": volume,
         "PD Volume": pd_vol,
