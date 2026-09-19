@@ -35,7 +35,7 @@ def build_watchlist_display_frame(df):
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     period_pcts = {
         name: _safe_numeric(rows.get(name, pd.NA), index=rows.index)
-        for name in ("1D%", "2D%", "3D%", "4D%", "1W%", "1M%")
+        for name in ("1D%", "2D%", "3D%", "4D%")
     }
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
@@ -107,7 +107,7 @@ def style_watchlist_table(df):
 
     def highlight_cells(row):
         styles = ['' for _ in row]
-        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%", "1W%", "1M%"}
+        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%"}
         for idx, col_name in enumerate(row.index):
             val = row[col_name]
             

@@ -443,6 +443,7 @@ def refresh_adapter_quotes(df, adapter):
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
 
 def refresh_indmoney_history(df, adapter):
+    """Fetches baseline PRICES in the background once every 15 minutes."""
     global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
     if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
         return
@@ -468,21 +469,44 @@ def refresh_indmoney_history(df, adapter):
             
         HISTORICAL_FETCHED_AT = time.time()
 
-    # Apply exactly: Return_N = (Close_t - Close_t-N) / Close_t-N * 100
-    for idx, row in watchlist.iterrows():
-        token = normalize_token(row.get("Token", ""))
-        baselines = HISTORICAL_BASELINES_CACHE.get(token, {})
-        current = float(row.get("CMP", 0) or 0)
+def apply_historical_baselines_to_frame(df):
+    """Calculates all percentages strictly in memory against LIVE CMP."""
+    if df is None or df.empty or 'Type' not in df.columns:
+        return
 
-        for col_name in ("1D%", "2D%", "3D%", "4D%", "1W%", "1M%"):
-            b_val = baselines.get(col_name, 0.0)
+    watchlist_mask = df.get("Type", "") == "Watchlist"
+    for idx in df[watchlist_mask].index:
+        token = normalize_token(df.loc[idx, "Token"])
+        sym = str(df.loc[idx, "Stock Name"]).strip().upper()
+        
+        baselines = HISTORICAL_BASELINES_CACHE.get(token) or HISTORICAL_BASELINES_CACHE.get(sym) or {}
+        current = float(df.loc[idx, "CMP"] or 0)
+        pc = float(df.loc[idx, "PC"] or 0)
+
+        # 1D% strictly mirrors live PC
+        if pc > 0 and current > 0:
+            df.at[idx, "1D%"] = ((current - pc) / pc) * 100
+        else:
+            b1 = baselines.get("1D_base", 0.0)
+            if b1 > 0 and current > 0:
+                df.at[idx, "1D%"] = ((current - b1) / b1) * 100
+
+        # Dynamic Recalculation for Multi-Day against Live CMP
+        def calc_ret(col_name, base_key):
+            b_val = baselines.get(base_key, 0.0)
             if b_val > 0 and current > 0:
                 df.at[idx, col_name] = ((current - b_val) / b_val) * 100
-            else:
+            elif col_name not in df.columns or pd.isna(df.loc[idx, col_name]):
                 df.at[idx, col_name] = 0.0
 
+        calc_ret("2D%", "2D_base")
+        calc_ret("3D%", "3D_base")
+        calc_ret("4D%", "4D_base")
+        calc_ret("1W%", "1W_base")
+        calc_ret("1M%", "1M_base")
+
 def sync_portfolio_registry(current_df=None):
-    global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME, HISTORICAL_FETCHED_AT
+    global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
     active_broker = os.environ.get("ACTIVE_BROKER", get_active_broker_name()).lower()
 
     if active_broker in ("indmoney", "us_stocks"):
@@ -527,6 +551,7 @@ def sync_portfolio_registry(current_df=None):
                 refresh_adapter_quotes(df, adapter)
                 if active_broker == "indmoney":
                     refresh_indmoney_history(df, adapter)
+                apply_historical_baselines_to_frame(df)
                 BROKER_CACHE[active_broker] = df
                 return df
         except Exception as e:
@@ -660,6 +685,7 @@ def sync_portfolio_registry(current_df=None):
     if combined:
         start_ws_daemon()
         df = pd.DataFrame(combined)
+        apply_historical_baselines_to_frame(df)
         BROKER_CACHE["angel_one"] = df
         return df
 
@@ -675,8 +701,6 @@ def stream_tick_cycle(df):
         try:
             adapter = get_active_broker_adapter()
             refresh_adapter_quotes(df, adapter)
-            if active_broker == "indmoney":
-                refresh_indmoney_history(df, adapter)
         except Exception:
             pass
     else:
@@ -706,6 +730,9 @@ def stream_tick_cycle(df):
 
         tick_vol = t_series.map(lambda t: _extract_live(t, 'Volume'))
         df['Volume'] = tick_vol.combine_first(pd.to_numeric(df.get('Volume'), errors='coerce')).fillna(0)
+
+    # DYNAMIC CALCULATION: Recalculate percentages dynamically against LIVE CMP every second
+    apply_historical_baselines_to_frame(df)
 
     for idx, row in df.iterrows():
         c_val = float(row.get("CMP", 0) or 0)
@@ -744,7 +771,7 @@ def stream_tick_cycle(df):
     df['Quantity'] = qty_series
     df['Average Price'] = avg_series
 
-    # Vectorized core formulas. Multi-day applied dynamically in refresh_indmoney_history loop above
+    # Vectorized core formulas
     df['D%'] = np.where(pc_series > 0, ((cmp_series - pc_series) / pc_series) * 100, 0.0)
     df['DH%'] = np.where(pc_series > 0, ((high_series - pc_series) / pc_series) * 100, 0.0)
     df['SAlert'] = np.where(cmp_series > 0, ((cmp_series - high_series) / cmp_series) * 100, 0.0)
@@ -1864,7 +1891,7 @@ class IndMoneyAdapter(BrokerAdapter):
         return records
 
     def fetch_daily_baselines(self, tokens: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
-        """Implementation of Model A: Strict N-Day Lookback (Close_t-N)"""
+        """Strict Model A Close_t-N baseline extraction counting backward from the latest completed session."""
         if not tokens:
             return {}
 
@@ -1880,7 +1907,7 @@ class IndMoneyAdapter(BrokerAdapter):
             baselines[raw_t] = {}
 
         now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)  # 60 calendar days
+        start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)
         ist_tz = timezone(timedelta(hours=5, minutes=30))
         today_ist = datetime.now(ist_tz).date()
 
@@ -1895,7 +1922,7 @@ class IndMoneyAdapter(BrokerAdapter):
                     "end_time": now_ms,
                 },
             )
-            time.sleep(0.08)  # API Rate limit buffer
+            time.sleep(0.08)
 
             if not isinstance(payload, dict):
                 continue
@@ -1933,31 +1960,29 @@ class IndMoneyAdapter(BrokerAdapter):
                     closed_candles = candles_by_date
                 
                 n = len(closed_candles)
-                last_session_date = closed_candles[-1][0]
                 
-                # Calendar targets for 1W / 1M
-                target_1w_date = last_session_date - timedelta(days=7)
-                target_1m_date = (pd.Timestamp(last_session_date) - pd.DateOffset(months=1)).date()
-
-                # Model A Exact Indices: Close_{t-N}
-                def close_t_minus(days_back: int) -> float:
-                    idx = n - days_back
-                    if idx < 0: idx = 0
-                    return closed_candles[idx][1]
-
-                def find_on_or_before(target_date) -> float:
-                    matching = [c[1] for c in closed_candles if c[0] <= target_date]
-                    return matching[-1] if matching else closed_candles[0][1]
+                # Strictly count backwards from the end of completed candles array:
+                # closed_candles[-1] = CMP session (Friday close)
+                # closed_candles[-2] = T-1 (Thursday close / 1D)
+                # closed_candles[-3] = T-2 (Wednesday close / 2D)
+                # closed_candles[-4] = T-3 (Tuesday close / 3D)
+                # closed_candles[-5] = T-4 (Monday/Prior close / 4D)
+                # closed_candles[-6] = T-5 (1W)
+                # closed_candles[-22] = T-21 (1M)
+                def get_close_at(index_from_end: int) -> float:
+                    pos = n - index_from_end
+                    if pos < 0: pos = 0
+                    return closed_candles[pos][1]
 
                 raw_token = scrip_key.split("_")[-1]
                 
                 entry = {
-                    "1D%": close_t_minus(1), # Close_{t-1}
-                    "2D%": close_t_minus(2), # Close_{t-2}
-                    "3D%": close_t_minus(3), # Close_{t-3}
-                    "4D%": close_t_minus(4), # Close_{t-4}
-                    "1W%": find_on_or_before(target_1w_date),  # 7 calendar days ago
-                    "1M%": find_on_or_before(target_1m_date),  # Exactly 1 Month ago
+                    "1D_base": get_close_at(2),   # T-1
+                    "2D_base": get_close_at(3),   # T-2
+                    "3D_base": get_close_at(4),   # T-3
+                    "4D_base": get_close_at(5),   # T-4
+                    "1W_base": get_close_at(6),   # T-5 (1 Week)
+                    "1M_base": get_close_at(22),  # T-21 (1 Month)
                 }
                 baselines[raw_token] = entry
                 baselines[scrip_key] = entry

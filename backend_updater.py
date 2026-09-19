@@ -499,8 +499,6 @@ def apply_historical_baselines_to_frame(df):
         calc_ret("2D%", "2D_base")
         calc_ret("3D%", "3D_base")
         calc_ret("4D%", "4D_base")
-        calc_ret("1W%", "1W_base")
-        calc_ret("1M%", "1M_base")
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
