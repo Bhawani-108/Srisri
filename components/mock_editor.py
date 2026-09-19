@@ -58,7 +58,6 @@ def render_mock_portfolio_editor():
                         import_df["Quantity"] = pd.to_numeric(import_df.get("Quantity", pd.NA), errors="coerce")
                         import_df["Buy Price"] = pd.to_numeric(import_df.get("Buy Price", pd.NA), errors="coerce")
                         import_df["Sell Price"] = pd.to_numeric(import_df.get("Sell Price", pd.NA), errors="coerce")
-                        import_df["PD Volume"] = pd.to_numeric(import_df.get("PD Volume", pd.NA), errors="coerce")
 
                         if "Buy Date" in import_df.columns:
                             parsed_date = pd.to_datetime(import_df["Buy Date"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -66,7 +65,7 @@ def render_mock_portfolio_editor():
                         else:
                             import_df["Buy Date"] = None
 
-                        cols_to_keep = ["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date", "PD Volume"]
+                        cols_to_keep = ["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]
                         prepared_import = import_df[cols_to_keep].copy()
                         new_watchlist_entries = [f"{str(r['Stock Name']).strip()}:{str(r.get('Exchange', 'NSE')).strip()}" for _, r in import_df.iterrows()]
 
@@ -109,11 +108,11 @@ def render_mock_portfolio_editor():
         init_watchlist = init_df[init_df['Type'] == 'Watchlist'].copy() if not init_df.empty and 'Type' in init_df.columns else pd.DataFrame()
         
         if not init_watchlist.empty:
-            for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]:
+            for col in ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]:
                 if col not in init_watchlist.columns: 
                     init_watchlist[col] = None
                     
-            mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date", "PD Volume"]].copy()
+            mock_editor_df = init_watchlist[["Stock Name", "Side", "Status", "Quantity", "Buy Price", "Sell Price", "Buy Date"]].copy()
             
             def clean_editor_col(val, pos_val, neg_val):
                 if pd.isna(val) or str(val).strip().upper() in ["", "NAN", "NONE", "NULL", "", "NA"]:
@@ -126,7 +125,6 @@ def render_mock_portfolio_editor():
             mock_editor_df["Quantity"] = pd.to_numeric(mock_editor_df["Quantity"], errors="coerce")
             mock_editor_df["Buy Price"] = pd.to_numeric(mock_editor_df["Buy Price"], errors="coerce")
             mock_editor_df["Sell Price"] = pd.to_numeric(mock_editor_df["Sell Price"], errors="coerce")
-            mock_editor_df["PD Volume"] = pd.to_numeric(mock_editor_df["PD Volume"], errors="coerce")
             
             if "Buy Date" in mock_editor_df.columns:
                 mock_editor_df["Buy Date"] = mock_editor_df["Buy Date"].astype("string")
@@ -143,7 +141,6 @@ def render_mock_portfolio_editor():
                     "Buy Price": st.column_config.NumberColumn("Buy Price"),
                     "Sell Price": st.column_config.NumberColumn("Sell Price"),
                     "Buy Date": st.column_config.TextColumn("Buy Date"),
-                    "PD Volume": st.column_config.NumberColumn("PD Volume"),
                 },
                 key="mock_editor"
             )

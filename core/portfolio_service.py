@@ -30,7 +30,7 @@ def apply_mock_portfolio(df):
     df = df.copy()
     mock_mapping = mock_df.set_index("Stock Name")
 
-    override_cols = ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
+    override_cols = ["Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]
     for col in override_cols:
         if col in mock_mapping.columns:
             mapped = df["Stock Name"].map(mock_mapping[col])

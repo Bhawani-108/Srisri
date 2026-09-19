@@ -348,10 +348,12 @@ class IndMoneyAdapter(BrokerAdapter):
                     try:
                         if isinstance(candle, dict):
                             close = float(candle.get("c") or candle.get("close") or candle.get("Close") or 0)
+                            volume = float(candle.get("v") or candle.get("volume") or candle.get("Volume") or 0)
                             ts = float(candle.get("ts") or candle.get("timestamp") or candle.get("time") or 0)
                         elif isinstance(candle, (list, tuple)) and len(candle) >= 5:
                             ts = float(candle[0])
                             close = float(candle[4])
+                            volume = float(candle[5]) if len(candle) > 5 else 0.0
                         else:
                             continue
 
@@ -359,7 +361,7 @@ class IndMoneyAdapter(BrokerAdapter):
                             continue
                         ts_sec = ts / 1000.0 if ts > 1e11 else ts
                         c_date = datetime.fromtimestamp(ts_sec, ist_tz).date()
-                        candles_by_date.append((c_date, close))
+                        candles_by_date.append((c_date, close, volume))
                     except Exception:
                         continue
 
@@ -371,10 +373,9 @@ class IndMoneyAdapter(BrokerAdapter):
                 if not closed_candles:
                     closed_candles = candles_by_date
 
-                previous_month_candles = [
-                    c for c in closed_candles if c[0] < current_month_start
-                ]
+                previous_month_candles = [c for c in closed_candles if c[0] < current_month_start]
                 pmc = previous_month_candles[-1][1] if previous_month_candles else 0.0
+                previous_day_volume = closed_candles[-2][2] if len(closed_candles) >= 2 else 0.0
                 
                 n = len(closed_candles)
                 if n >= 6:
@@ -399,6 +400,7 @@ class IndMoneyAdapter(BrokerAdapter):
                     "3D%": pct_3d,
                     "4D%": pct_4d,
                     "PMC": pmc,
+                    "PD Volume": previous_day_volume,
                 }
                 
                 baselines[raw_token] = entry

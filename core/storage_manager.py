@@ -9,7 +9,7 @@ MOCK_PORTFOLIO_FILE = os.path.join(APP_DIR, "mock_portfolio.csv")
 
 _CACHED_MOCK_PORTFOLIO = None
 _LAST_MOCK_MTIME = 0
-MOCK_SCHEMA = ["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status", "PD Volume"]
+MOCK_SCHEMA = ["Stock Name", "Buy Date", "Quantity", "Buy Price", "Sell Price", "Side", "Status"]
 
 def load_column_prefs():
     return get_visible_columns()
@@ -40,7 +40,7 @@ def load_mock_portfolio():
             df["Stock Name"] = df["Stock Name"].astype(str).str.upper()
             for col in MOCK_SCHEMA:
                 if col not in df.columns:
-                    df[col] = 0 if col == "PD Volume" else pd.NA
+                    df[col] = pd.NA
             _CACHED_MOCK_PORTFOLIO = df.reset_index(drop=True)
     except Exception:
         _CACHED_MOCK_PORTFOLIO = pd.DataFrame(columns=MOCK_SCHEMA)

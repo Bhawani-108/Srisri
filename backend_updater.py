@@ -490,6 +490,7 @@ def apply_historical_baselines_to_frame(df):
         df.at[idx, "3D%"] = baselines.get("3D%", 0.0)
         df.at[idx, "4D%"] = baselines.get("4D%", 0.0)
         df.at[idx, "PMC"] = baselines.get("PMC", 0.0)
+        df.at[idx, "PD Volume"] = baselines.get("PD Volume", 0.0)
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
