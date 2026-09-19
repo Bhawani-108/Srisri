@@ -248,22 +248,46 @@ class IndMoneyAdapter(BrokerAdapter):
                 }))
         return records
 
-    def fetch_daily_baselines(self, tokens: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
-        """Strict Model A Close_t-N baseline extraction counting backward from the latest completed session."""
-        if not tokens:
+    def fetch_daily_baselines(self, tokens_or_symbols: Optional[List[str]] = None) -> Dict[str, Dict[str, float]]:
+        """Extracts historical daily close prices and computes consecutive day-over-day percentage changes."""
+        if not tokens_or_symbols:
             return {}
 
+        instrument_map = self._get_equity_instrument_map()
         codes = []
-        for token in tokens:
-            code = str(token).strip()
-            if code:
-                codes.append(code if "_" in code else f"NSE_{code}")
+        token_to_key = {}
+
+        for item in tokens_or_symbols:
+            code = str(item).strip()
+            if not code:
+                continue
+            
+            # Resolve symbol (e.g. "ACE") to numerical security ID using instrument map
+            sec_id = code
+            if not code.isdigit() and "_" not in code:
+                sec_id = instrument_map.get(("NSE", code), instrument_map.get(("BSE", code), ""))
+                if not sec_id:
+                    for (exch, sym), s_id in instrument_map.items():
+                        if sym == code:
+                            sec_id = s_id
+                            break
+            
+            # If we still don't have a valid numeric security ID, skip or try using code as is if numeric
+            if not sec_id:
+                sec_id = code
+
+            scrip_code = sec_id if "_" in sec_id else f"NSE_{sec_id}"
+            codes.append(scrip_code)
+            raw_t = scrip_code.split("_")[-1]
+            token_to_key[raw_t] = code
+            token_to_key[scrip_code] = code
+            token_to_key[code] = code
+
+        codes = list(dict.fromkeys(codes))
+        if not codes:
+            return {}
 
         baselines: Dict[str, Dict[str, float]] = {}
-        for token in tokens:
-            raw_t = str(token).replace("NSE_", "").strip()
-            baselines[raw_t] = {}
-
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - (60 * 24 * 60 * 60 * 1000)
         ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -282,6 +306,25 @@ class IndMoneyAdapter(BrokerAdapter):
             )
             time.sleep(0.08)
 
+            # Fallback to individual requests if batch fails
+            if not isinstance(payload, dict) or not payload.get("data"):
+                for scrip_code in batch:
+                    single_payload = self._request(
+                        "GET",
+                        "/market/historical/1day",
+                        params={
+                            "scrip-codes": scrip_code,
+                            "start_time": start_ms,
+                            "end_time": now_ms,
+                        },
+                    )
+                    if isinstance(single_payload, dict) and single_payload.get("data"):
+                        if not isinstance(payload, dict):
+                            payload = {"data": {}}
+                        if isinstance(payload.get("data"), dict):
+                            payload["data"].update(single_payload["data"])
+                    time.sleep(0.05)
+
             if not isinstance(payload, dict):
                 continue
 
@@ -290,15 +333,27 @@ class IndMoneyAdapter(BrokerAdapter):
                 continue
 
             for scrip_key, instrument in data_block.items():
-                candles = instrument.get("candles") if isinstance(instrument, dict) else None
+                candles = []
+                if isinstance(instrument, dict):
+                    candles = instrument.get("candles") or instrument.get("data") or []
+                elif isinstance(instrument, list):
+                    candles = instrument
+
                 if not isinstance(candles, list) or not candles:
                     continue
 
                 candles_by_date = []
                 for candle in candles:
                     try:
-                        close = float(candle.get("c", 0) or 0)
-                        ts = float(candle.get("ts", 0) or 0)
+                        if isinstance(candle, dict):
+                            close = float(candle.get("c") or candle.get("close") or candle.get("Close") or 0)
+                            ts = float(candle.get("ts") or candle.get("timestamp") or candle.get("time") or 0)
+                        elif isinstance(candle, (list, tuple)) and len(candle) >= 5:
+                            ts = float(candle[0])
+                            close = float(candle[4])
+                        else:
+                            continue
+
                         if ts <= 0 or close <= 0:
                             continue
                         ts_sec = ts / 1000.0 if ts > 1e11 else ts
@@ -311,38 +366,37 @@ class IndMoneyAdapter(BrokerAdapter):
                     continue
 
                 candles_by_date.sort(key=lambda x: x[0])
-                
-                # Filter strictly for completed sessions
                 closed_candles = [c for c in candles_by_date if c[0] < today_ist]
                 if not closed_candles:
                     closed_candles = candles_by_date
                 
                 n = len(closed_candles)
-                
-                # Strictly count backwards from the end of completed candles array:
-                # closed_candles[-1] = CMP session (Friday close)
-                # closed_candles[-2] = T-1 (Thursday close / 1D)
-                # closed_candles[-3] = T-2 (Wednesday close / 2D)
-                # closed_candles[-4] = T-3 (Tuesday close / 3D)
-                # closed_candles[-5] = T-4 (Monday/Prior close / 4D)
-                # closed_candles[-6] = T-5 (1W)
-                # closed_candles[-22] = T-21 (1M)
-                def get_close_at(index_from_end: int) -> float:
-                    pos = n - index_from_end
-                    if pos < 0: pos = 0
-                    return closed_candles[pos][1]
+                if n >= 6:
+                    c_t1 = closed_candles[-1][1]  # Latest closed session
+                    c_t2 = closed_candles[-2][1]  # 1D% session close
+                    c_t3 = closed_candles[-3][1]  # 2D% session close
+                    c_t4 = closed_candles[-4][1]  # 3D% session close
+                    c_t5 = closed_candles[-5][1]  # 4D% session close
+                    c_t6 = closed_candles[-6][1]
+
+                    pct_1d = ((c_t2 - c_t3) / c_t3) * 100 if c_t3 > 0 else 0.0
+                    pct_2d = ((c_t3 - c_t4) / c_t4) * 100 if c_t4 > 0 else 0.0
+                    pct_3d = ((c_t4 - c_t5) / c_t5) * 100 if c_t5 > 0 else 0.0
+                    pct_4d = ((c_t5 - c_t6) / c_t6) * 100 if c_t6 > 0 else 0.0
+                else:
+                    pct_1d = pct_2d = pct_3d = pct_4d = 0.0
 
                 raw_token = scrip_key.split("_")[-1]
-                
                 entry = {
-                    "1D_base": get_close_at(2),   # T-1
-                    "2D_base": get_close_at(3),   # T-2
-                    "3D_base": get_close_at(4),   # T-3
-                    "4D_base": get_close_at(5),   # T-4
-                    "1W_base": get_close_at(6),   # T-5 (1 Week)
-                    "1M_base": get_close_at(22),  # T-21 (1 Month)
+                    "1D%": pct_1d,
+                    "2D%": pct_2d,
+                    "3D%": pct_3d,
+                    "4D%": pct_4d,
                 }
+                
                 baselines[raw_token] = entry
                 baselines[scrip_key] = entry
+                if raw_token in token_to_key:
+                    baselines[token_to_key[raw_token]] = entry
 
         return baselines

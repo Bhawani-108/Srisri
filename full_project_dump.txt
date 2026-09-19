@@ -502,8 +502,6 @@ def apply_historical_baselines_to_frame(df):
         calc_ret("2D%", "2D_base")
         calc_ret("3D%", "3D_base")
         calc_ret("4D%", "4D_base")
-        calc_ret("1W%", "1W_base")
-        calc_ret("1M%", "1M_base")
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
@@ -826,8 +824,6 @@ FILE: \column_config.json
     {"name": "2D%", "type": "numeric", "visible": true},
     {"name": "3D%", "type": "numeric", "visible": true},
     {"name": "4D%", "type": "numeric", "visible": true},
-    {"name": "1W%", "type": "numeric", "visible": true},
-    {"name": "1M%", "type": "numeric", "visible": true},
     {"name": "M %", "type": "formula", "formula": "IF(T_CMP_V == 0, 0, ((CMP - PMC) / PMC) * 100)", "visible": true},
     {"name": "Buy Date", "type": "data", "visible": true},
     {"name": "Buy Price", "type": "numeric", "visible": true},
@@ -1395,7 +1391,6 @@ STARTECK:NSE
 DAICHI:NSE
 VEDAVAAG:NSE
 GNFC:NSE
-INFY:NSE
 
 
 
@@ -3123,7 +3118,7 @@ def build_watchlist_display_frame(df):
     dh_pct = _safe_numeric(rows.get("DH%", pd.NA), index=rows.index)
     period_pcts = {
         name: _safe_numeric(rows.get(name, pd.NA), index=rows.index)
-        for name in ("1D%", "2D%", "3D%", "4D%", "1W%", "1M%")
+        for name in ("1D%", "2D%", "3D%", "4D%")
     }
     s_alert = _safe_numeric(rows.get("SAlert", pd.NA), index=rows.index)
     pd_vol = _safe_numeric(rows.get("PD Volume", 0), index=rows.index).fillna(0)
@@ -3195,7 +3190,7 @@ def style_watchlist_table(df):
 
     def highlight_cells(row):
         styles = ['' for _ in row]
-        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%", "1W%", "1M%"}
+        color_target_cols = {"D%", "% Profit", "1D%", "2D%", "3D%", "4D%"}
         for idx, col_name in enumerate(row.index):
             val = row[col_name]
             

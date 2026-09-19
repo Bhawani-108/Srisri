@@ -440,22 +440,34 @@ def refresh_adapter_quotes(df, adapter):
         df.at[idx, "Volume"] = float(quote.get("Volume", 0) or 0)
 
 def refresh_indmoney_history(df, adapter):
-    """Fetches baseline PRICES in the background once every 15 minutes."""
+    """Fetches baseline historical percentages in the background once every 15 minutes."""
     global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
     if df is None or df.empty or not hasattr(adapter, "fetch_daily_baselines"):
         return
 
     watchlist = df[df.get("Type", "") == "Watchlist"]
-    tokens = [normalize_token(token) for token in watchlist.get("Token", []) if normalize_token(token)]
-    tokens = list(dict.fromkeys(tokens))
-    if not tokens:
+    if watchlist.empty:
+        return
+
+    # Collect both tokens and stock symbols as fallback keys
+    identifiers = []
+    for _, row in watchlist.iterrows():
+        tok = normalize_token(row.get("Token", ""))
+        sym = str(row.get("Stock Name", "")).strip().upper()
+        if tok:
+            identifiers.append(tok)
+        if sym:
+            identifiers.append(sym)
+
+    identifiers = list(dict.fromkeys(identifiers))
+    if not identifiers:
         return
 
     now = time.time()
-    missing = [t for t in tokens if t not in HISTORICAL_BASELINES_CACHE]
+    missing = [t for t in identifiers if t not in HISTORICAL_BASELINES_CACHE]
     
     if (now - HISTORICAL_FETCHED_AT >= 900) or missing:
-        to_fetch = tokens if (now - HISTORICAL_FETCHED_AT >= 900) else missing
+        to_fetch = identifiers if (now - HISTORICAL_FETCHED_AT >= 900) else missing
         for t in to_fetch:
             if t not in HISTORICAL_BASELINES_CACHE:
                 HISTORICAL_BASELINES_CACHE[t] = {}
@@ -467,7 +479,7 @@ def refresh_indmoney_history(df, adapter):
         HISTORICAL_FETCHED_AT = time.time()
 
 def apply_historical_baselines_to_frame(df):
-    """Calculates all percentages strictly in memory against LIVE CMP."""
+    """Assigns precalculated day-over-day historical close percentages to 1D%, 2D%, 3D%, 4D%."""
     if df is None or df.empty or 'Type' not in df.columns:
         return
 
@@ -477,28 +489,11 @@ def apply_historical_baselines_to_frame(df):
         sym = str(df.loc[idx, "Stock Name"]).strip().upper()
         
         baselines = HISTORICAL_BASELINES_CACHE.get(token) or HISTORICAL_BASELINES_CACHE.get(sym) or {}
-        current = float(df.loc[idx, "CMP"] or 0)
-        pc = float(df.loc[idx, "PC"] or 0)
 
-        # 1D% strictly mirrors live PC
-        if pc > 0 and current > 0:
-            df.at[idx, "1D%"] = ((current - pc) / pc) * 100
-        else:
-            b1 = baselines.get("1D_base", 0.0)
-            if b1 > 0 and current > 0:
-                df.at[idx, "1D%"] = ((current - b1) / b1) * 100
-
-        # Dynamic Recalculation for Multi-Day against Live CMP
-        def calc_ret(col_name, base_key):
-            b_val = baselines.get(base_key, 0.0)
-            if b_val > 0 and current > 0:
-                df.at[idx, col_name] = ((current - b_val) / b_val) * 100
-            elif col_name not in df.columns or pd.isna(df.loc[idx, col_name]):
-                df.at[idx, col_name] = 0.0
-
-        calc_ret("2D%", "2D_base")
-        calc_ret("3D%", "3D_base")
-        calc_ret("4D%", "4D_base")
+        df.at[idx, "1D%"] = baselines.get("1D%", 0.0)
+        df.at[idx, "2D%"] = baselines.get("2D%", 0.0)
+        df.at[idx, "3D%"] = baselines.get("3D%", 0.0)
+        df.at[idx, "4D%"] = baselines.get("4D%", 0.0)
 
 def sync_portfolio_registry(current_df=None):
     global LAST_WATCHLIST_MTIME, BROKER_CACHE, LAST_POSITIONS_FETCH_TIME
