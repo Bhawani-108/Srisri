@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from brokers.config import get_active_broker_name, get_broker_secrets
 from brokers.manager import get_active_broker_adapter
@@ -377,6 +377,106 @@ HISTORICAL_BASELINES_CACHE = {}
 HISTORICAL_FETCHED_AT = 0.0
 LAST_POSITIONS_FETCH_TIME = 0.0
 
+def fetch_angel_daily_baselines(rows):
+    """Fetch daily candles from SmartAPI and derive the shared history fields."""
+    global smart_connect
+
+    if not rows:
+        return {}
+    if not smart_connect:
+        authenticate()
+    if not smart_connect:
+        return {}
+
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(ist_tz).date()
+    current_month_start = today_ist.replace(day=1)
+    now = datetime.now(ist_tz)
+    from_date = (now - timedelta(days=60)).strftime("%Y-%m-%d 09:15")
+    to_date = now.strftime("%Y-%m-%d %H:%M")
+    results = {}
+
+    for row in rows:
+        token = normalize_token(row.get("Token", ""))
+        symbol = str(row.get("Stock Name", "")).strip().upper()
+        exchange = str(row.get("Exchange", "NSE")).strip().upper()
+        if not token:
+            continue
+
+        try:
+            response = smart_connect.getCandleData({
+                "exchange": exchange,
+                "symboltoken": token,
+                "interval": "ONE_DAY",
+                "fromdate": from_date,
+                "todate": to_date,
+            })
+        except Exception:
+            continue
+
+        candles = response.get("data", []) if isinstance(response, dict) else []
+        parsed = []
+        for candle in candles if isinstance(candles, list) else []:
+            try:
+                if not isinstance(candle, (list, tuple)) or len(candle) < 6:
+                    continue
+                timestamp = datetime.fromisoformat(str(candle[0]).replace("Z", "+00:00"))
+                candle_date = timestamp.astimezone(ist_tz).date()
+                close = float(candle[4] or 0)
+                volume = float(candle[5] or 0)
+                if candle_date <= today_ist and close > 0:
+                    parsed.append((candle_date, close, volume))
+            except (TypeError, ValueError, IndexError):
+                continue
+
+        if not parsed:
+            continue
+        parsed.sort(key=lambda item: item[0])
+        closed = [item for item in parsed if item[0] < today_ist] or parsed
+        previous_month = [item for item in closed if item[0] < current_month_start]
+        pmc = previous_month[-1][1] if previous_month else 0.0
+        previous_day_volume = closed[-2][2] if len(closed) >= 2 else 0.0
+
+        values = {"PMC": pmc, "PD Volume": previous_day_volume}
+        if len(closed) >= 6:
+            closes = [item[1] for item in closed[-6:]]
+            values.update({
+                "1D%": ((closes[4] - closes[3]) / closes[3]) * 100 if closes[3] > 0 else 0.0,
+                "2D%": ((closes[3] - closes[2]) / closes[2]) * 100 if closes[2] > 0 else 0.0,
+                "3D%": ((closes[2] - closes[1]) / closes[1]) * 100 if closes[1] > 0 else 0.0,
+                "4D%": ((closes[1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0.0,
+            })
+        else:
+            values.update({"1D%": 0.0, "2D%": 0.0, "3D%": 0.0, "4D%": 0.0})
+
+        results[token] = values
+        if symbol:
+            results[symbol] = values
+
+    return results
+
+def refresh_angel_history(df):
+    """Refresh cached Angel One history for holdings and watchlist rows every 15 minutes."""
+    global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
+    if df is None or df.empty:
+        return
+
+    rows = df.to_dict("records")
+    identifiers = []
+    for row in rows:
+        token = normalize_token(row.get("Token", ""))
+        symbol = str(row.get("Stock Name", "")).strip().upper()
+        identifiers.extend(value for value in (token, symbol) if value)
+    identifiers = list(dict.fromkeys(identifiers))
+    missing = [identifier for identifier in identifiers if identifier not in HISTORICAL_BASELINES_CACHE]
+    if not identifiers or (time.time() - HISTORICAL_FETCHED_AT < 900 and not missing):
+        return
+
+    fetched = fetch_angel_daily_baselines(rows)
+    if fetched:
+        HISTORICAL_BASELINES_CACHE.update(fetched)
+    HISTORICAL_FETCHED_AT = time.time()
+
 def refresh_adapter_quotes(df, adapter):
     if df is None or df.empty:
         return
@@ -672,6 +772,7 @@ def sync_portfolio_registry(current_df=None):
     if combined:
         start_ws_daemon()
         df = pd.DataFrame(combined)
+        refresh_angel_history(df)
         apply_historical_baselines_to_frame(df)
         BROKER_CACHE["angel_one"] = df
         return df
