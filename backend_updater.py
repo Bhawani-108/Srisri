@@ -377,6 +377,32 @@ HISTORICAL_BASELINES_CACHE = {}
 HISTORICAL_FETCHED_AT = 0.0
 LAST_POSITIONS_FETCH_TIME = 0.0
 
+def reset_runtime_state():
+    """Drop broker-specific runtime state before starting a fresh broker session."""
+    global smart_connect, JWT_TOKEN, FEED_TOKEN, WS_APP, IS_WS_READY
+    global SUBSCRIBED_TOKENS, PENDING_EXCHANGE_GROUPS
+    global LAST_WATCHLIST_MTIME, LAST_POSITIONS_FETCH_TIME
+    global HISTORICAL_BASELINES_CACHE, HISTORICAL_FETCHED_AT
+
+    BROKER_CACHE.clear()
+    HISTORICAL_BASELINES_CACHE.clear()
+    HISTORICAL_FETCHED_AT = 0.0
+    LAST_WATCHLIST_MTIME = 0
+    LAST_POSITIONS_FETCH_TIME = 0.0
+    SUBSCRIBED_TOKENS.clear()
+    PENDING_EXCHANGE_GROUPS = {}
+    IS_WS_READY = False
+
+    if WS_APP is not None:
+        try:
+            WS_APP.close_connection()
+        except Exception:
+            pass
+    WS_APP = None
+    smart_connect = None
+    JWT_TOKEN = None
+    FEED_TOKEN = None
+
 def fetch_angel_daily_baselines(rows):
     """Fetch daily candles from SmartAPI and derive the shared history fields."""
     global smart_connect

@@ -58,9 +58,8 @@ selected_broker = st.selectbox(
 if selected_broker != st.session_state.active_broker:
     st.session_state.active_broker = selected_broker
     os.environ["ACTIVE_BROKER"] = str(selected_broker).strip().lower()
+    backend_updater.reset_runtime_state()
     get_all_indexed_symbols.clear()
-    backend_updater.LAST_WATCHLIST_MTIME = 0
-    backend_updater.LAST_SYNCED_BROKER = None
     with st.spinner(f"Switching feed to {selected_broker}..."):
         fresh_df = backend_updater.sync_portfolio_registry(None)
         if fresh_df is not None and not fresh_df.empty:
