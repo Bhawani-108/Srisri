@@ -386,19 +386,21 @@ class IndMoneyAdapter(BrokerAdapter):
                     c_t5 = closed_candles[-5][1]  # 4D% session close
                     c_t6 = closed_candles[-6][1]
 
+                    pct_0d = ((c_t1 - c_t2) / c_t2) * 100 if c_t2 > 0 else 0.0
                     pct_1d = ((c_t2 - c_t3) / c_t3) * 100 if c_t3 > 0 else 0.0
                     pct_2d = ((c_t3 - c_t4) / c_t4) * 100 if c_t4 > 0 else 0.0
                     pct_3d = ((c_t4 - c_t5) / c_t5) * 100 if c_t5 > 0 else 0.0
                     pct_4d = ((c_t5 - c_t6) / c_t6) * 100 if c_t6 > 0 else 0.0
                 else:
+                    pct_0d = 0.0
                     pct_1d = pct_2d = pct_3d = pct_4d = 0.0
 
                 raw_token = scrip_key.split("_")[-1]
                 entry = {
-                    "1D%": pct_1d,
-                    "2D%": pct_2d,
-                    "3D%": pct_3d,
-                    "4D%": pct_4d,
+                    "1D%": pct_0d, #last day percentage change
+                    "2D%": pct_1d, #last 2 day percentage change
+                    "3D%": pct_2d, #last 3 day percentage change
+                    "4D%": pct_3d, #last 4 day percentage change
                     "PMC": pmc,
                     "PD Volume": previous_day_volume,
                 }
